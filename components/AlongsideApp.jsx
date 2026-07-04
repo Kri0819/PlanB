@@ -2,60 +2,157 @@ import React, { useState, useEffect, useRef, useMemo } from "react";
 import {
   Home, MessageCircle, Leaf, Sun, Moon, Coffee, UtensilsCrossed,
   Footprints, Sparkles, Check, ChevronRight, ChevronDown, Bell, HeartPulse,
-  CalendarDays, Cloud, Palette, Download, Upload, Pill, Ban,
-  Smartphone, Send, Briefcase, Watch, User as UserIcon,
+  CalendarDays, Download, Upload, Pill, Ban, Smartphone, Send, Briefcase,
+  User as UserIcon, Edit3, Trash2, GripVertical, Plus, ArrowRight,
 } from "lucide-react";
 
 /* ----------------------------------------------------------------------
-   同行｜Alongside — AI Life Companion
-   Design tokens
+   同行｜Alongside — v0.0.3 "Living Data"
+   資料開始被記錄：Local Storage 持久化、可編輯／可拖曳排序的 Journey、
+   Discussion 真正修改 Tomorrow Journey 與 Goals、My Life 可編輯。
 ---------------------------------------------------------------------- */
+
+const STORAGE_KEY = "alongside_state_v1";
 
 const COLORS = {
   light: {
-    bg: "#F6F5F2",
-    phoneBg: "#FBFAF8",
-    surface: "#FFFFFF",
-    surfaceAlt: "#F0EFEA",
-    border: "#E7E5DF",
-    textPrimary: "#211F1C",
-    textSecondary: "#6E6B64",
-    textTertiary: "#A6A29A",
-    accent: "#6B8F71",
-    accentSoft: "#E4EEE3",
-    accent2: "#7480C4",
-    accent2Soft: "#E7E9F7",
-    userBubble: "#6B8F71",
-    userBubbleText: "#FFFFFF",
-    aiBubble: "#F0EFEA",
-    danger: "#B97A6B",
-    shadow: "0 20px 60px rgba(40,38,32,0.10)",
-    statusBarText: "#211F1C",
+    bg: "#F6F5F2", phoneBg: "#FBFAF8", surface: "#FFFFFF", surfaceAlt: "#F0EFEA",
+    border: "#E7E5DF", textPrimary: "#211F1C", textSecondary: "#6E6B64",
+    textTertiary: "#A6A29A", accent: "#6B8F71", accentSoft: "#E4EEE3",
+    accent2: "#7480C4", accent2Soft: "#E7E9F7", userBubble: "#6B8F71",
+    userBubbleText: "#FFFFFF", aiBubble: "#F0EFEA", danger: "#B97A6B",
+    shadow: "0 20px 60px rgba(40,38,32,0.10)", statusBarText: "#211F1C",
   },
   dark: {
-    bg: "#0B0C0C",
-    phoneBg: "#141513",
-    surface: "#1D1F1C",
-    surfaceAlt: "#262824",
-    border: "#33352F",
-    textPrimary: "#F3F1EC",
-    textSecondary: "#A6A29A",
-    textTertiary: "#726F68",
-    accent: "#84AC8A",
-    accentSoft: "#26332A",
-    accent2: "#98A2E0",
-    accent2Soft: "#282A3C",
-    userBubble: "#84AC8A",
-    userBubbleText: "#12180F",
-    aiBubble: "#262824",
-    danger: "#C99184",
-    shadow: "0 20px 60px rgba(0,0,0,0.45)",
-    statusBarText: "#F3F1EC",
+    bg: "#0B0C0C", phoneBg: "#141513", surface: "#1D1F1C", surfaceAlt: "#262824",
+    border: "#33352F", textPrimary: "#F3F1EC", textSecondary: "#A6A29A",
+    textTertiary: "#726F68", accent: "#84AC8A", accentSoft: "#26332A",
+    accent2: "#98A2E0", accent2Soft: "#282A3C", userBubble: "#84AC8A",
+    userBubbleText: "#12180F", aiBubble: "#262824", danger: "#C99184",
+    shadow: "0 20px 60px rgba(0,0,0,0.45)", statusBarText: "#F3F1EC",
   },
 };
 
 const SERIF = "'Newsreader', 'Noto Serif TC', serif";
 const SANS = "'Inter', 'Noto Sans TC', -apple-system, sans-serif";
+
+const ICONS = { Sun, Moon, Coffee, UtensilsCrossed, Briefcase, Footprints, Sparkles, Smartphone, Pill, HeartPulse, Bell, Home };
+const ICON_OPTIONS = ["Sun", "Coffee", "UtensilsCrossed", "Briefcase", "Footprints", "Sparkles", "Moon", "Smartphone", "Pill", "HeartPulse", "Bell", "Home"];
+
+const PHASE_OPTIONS = [
+  { id: "morning", emoji: "🌞", label: "早晨" },
+  { id: "work", emoji: "💻", label: "工作" },
+  { id: "midday", emoji: "🍽", label: "午間" },
+  { id: "out", emoji: "🚶", label: "外出" },
+  { id: "night", emoji: "🌙", label: "夜晚" },
+  { id: "day", emoji: "🌤", label: "其他" },
+];
+const PHASE_STATUS = {
+  morning: { emoji: "🌞", text: "剛起床" },
+  work: { emoji: "💻", text: "工作中" },
+  midday: { emoji: "🍽", text: "午餐時間" },
+  out: { emoji: "🚶", text: "外出中" },
+  night: { emoji: "🌙", text: "準備睡覺" },
+  day: { emoji: "🌤", text: "忙碌中" },
+};
+
+const ENCOURAGEMENTS = [
+  "昨天睡得比較少，今天我們放慢一點。",
+  "很好，一步一步來就好。",
+  "這個步調，感覺還舒服嗎？",
+  "最近的節奏越來越穩定了。",
+  "不用急，今天時間還很多。",
+  "做得很好，剩下的慢慢來。",
+];
+
+const JOURNEY_TEMPLATE = [
+  { id: "wake", label: "起床", iconKey: "Sun", emoji: "🌞", phase: "morning", sub: "新的一天開始了。", reason: "先讓自己醒過來就好，不用急著做什麼。" },
+  { id: "milktea", label: "奶茶", iconKey: "Coffee", emoji: "🥛", phase: "morning", sub: "慢慢喝，不用急。", reason: "昨天空腹的時間有點長，先讓身體暖一下，不用急著吃正餐。" },
+  { id: "breakfast", label: "早餐", iconKey: "UtensilsCrossed", emoji: "🍳", phase: "morning", sub: "有吃就好，不用豐盛。", reason: "空腹一段時間了，簡單吃點東西，讓身體慢慢醒過來就好。" },
+  { id: "work", label: "工作", iconKey: "Briefcase", emoji: "💻", phase: "work", sub: "先從最小的一件事開始。", reason: "早上的專注力通常比較好，先做一件小事，開始就不難了。" },
+  { id: "lunch", label: "午餐", iconKey: "UtensilsCrossed", emoji: "🍽", phase: "midday", sub: "找個地方，好好坐著吃。", reason: "工作了一個上午，讓自己好好吃頓飯，是很值得的休息。" },
+  { id: "walk", label: "散步", iconKey: "Footprints", emoji: "🚶", phase: "out", sub: "不用刻意，晃一晃就好。", reason: "坐了比較久，起來動一動，等等會更容易靜下心。" },
+  { id: "skincare", label: "保養", iconKey: "Sparkles", emoji: "🧴", phase: "night", sub: "洗臉、擦乳液，就好。", reason: "一天差不多要結束了，花一點時間照顧自己，慢慢放鬆下來。" },
+  { id: "sleep", label: "睡覺", iconKey: "Moon", emoji: "🌙", phase: "night", sub: "放下手機，關燈。", reason: "時間差不多了，讓身體知道，可以慢慢進入休息了。" },
+];
+
+function todayStr() {
+  const d = new Date();
+  return `${d.getFullYear()}-${d.getMonth() + 1}-${d.getDate()}`;
+}
+
+function genId() {
+  return `item-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+}
+
+function ensureCurrent(items) {
+  if (items.length === 0) return items;
+  if (items.some((i) => i.status === "current")) return items;
+  const idx = items.findIndex((i) => i.status !== "done");
+  if (idx === -1) return items;
+  return items.map((it, i) => (i === idx ? { ...it, status: "current" } : it));
+}
+
+function createInitialState() {
+  return {
+    version: 1,
+    theme: "light",
+    lastOpenedDate: todayStr(),
+    profile: {
+      name: "", birthday: "", workType: "遠端 · 彈性時間", shift: "無固定班表",
+      sleep: "23:30 – 07:30", diet: "少油少糖", dislikedFoods: "香菜、內臟",
+      supplements: "維他命 D、魚油", medications: "無",
+    },
+    aiPersonality: "gentle",
+    notifications: { dailyReminder: true, quietMode: false },
+    healthSync: { appleHealth: true, googleHealth: false, appleCal: true, googleCal: false },
+    goals: [],
+    msgIndex: 0,
+    todayJourney: JOURNEY_TEMPLATE.map((t, i) => ({ ...t, status: i === 0 ? "current" : "upcoming", completedAt: null })),
+    tomorrowJourney: JOURNEY_TEMPLATE.map((t) => ({ ...t, status: "upcoming", completedAt: null })),
+    history: {},
+    discussion: {
+      messages: [{ role: "ai", text: "最近第一餐都很晚。原因是什麼？" }],
+      step: 0, showUpdate: false, applied: false,
+    },
+  };
+}
+
+function loadState() {
+  try {
+    const raw = window.localStorage.getItem(STORAGE_KEY);
+    if (!raw) return createInitialState();
+    const parsed = JSON.parse(raw);
+    if (!parsed || parsed.version !== 1) return createInitialState();
+    return parsed;
+  } catch (e) {
+    return createInitialState();
+  }
+}
+
+function saveState(state) {
+  try {
+    window.localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+  } catch (e) {
+    /* storage unavailable — fail silently, prototype still works in-memory */
+  }
+}
+
+function rollToNextDay(state, opts) {
+  const { archiveKey, newDate } = opts || {};
+  const entries = state.todayJourney.filter((i) => i.completedAt).map((i) => ({ id: i.id, label: i.label, completedAt: i.completedAt }));
+  const history = { ...state.history, [archiveKey || state.lastOpenedDate || "unknown"]: { entries } };
+  const newToday = state.tomorrowJourney.map((t, i) => ({ ...t, status: i === 0 ? "current" : "upcoming", completedAt: null }));
+  const newTomorrow = newToday.map((t) => ({ ...t, status: "upcoming", completedAt: null }));
+  return {
+    ...state, history, todayJourney: newToday, tomorrowJourney: newTomorrow,
+    lastOpenedDate: newDate || todayStr(), msgIndex: 0,
+  };
+}
+
+/* ----------------------------------------------------------------------
+   Global style
+---------------------------------------------------------------------- */
 
 const GlobalStyle = () => (
   <style>{`
@@ -71,75 +168,9 @@ const GlobalStyle = () => (
     @keyframes bobIn { 0% { opacity:0; transform: scale(0.92) translateY(8px);} 100% { opacity:1; transform: scale(1) translateY(0);} }
     @keyframes cardEnter { 0% { opacity:0; transform: translateY(22px) scale(0.98);} 100% { opacity:1; transform: translateY(0) scale(1);} }
     @keyframes cardExit { 0% { opacity:1; transform: translateY(0) scale(1);} 100% { opacity:0; transform: translateY(-26px) scale(0.98);} }
+    @keyframes toastIn { from { opacity:0; transform: translate(-50%,-10px);} to { opacity:1; transform: translate(-50%,0);} }
   `}</style>
 );
-
-/* ----------------------------------------------------------------------
-   Data
----------------------------------------------------------------------- */
-
-const INITIAL_JOURNEY = [
-  { id: "wake", label: "起床", icon: Sun },
-  { id: "milktea", label: "奶茶", icon: Coffee },
-  { id: "breakfast", label: "早餐", icon: UtensilsCrossed },
-  { id: "work", label: "工作", icon: Briefcase },
-  { id: "lunch", label: "午餐", icon: UtensilsCrossed },
-  { id: "walk", label: "散步", icon: Footprints },
-  { id: "skincare", label: "保養", icon: Sparkles },
-  { id: "sleep", label: "睡覺", icon: Moon },
-];
-
-const TASK_DETAIL = {
-  milktea: {
-    emoji: "🥛", title: "泡一杯無糖鮮奶茶", sub: "慢慢喝，不用急。",
-    reason: "昨天空腹的時間有點長，先讓身體暖一下，不用急著吃正餐。",
-  },
-  breakfast: {
-    emoji: "🍳", title: "簡單吃點早餐", sub: "有吃就好，不用豐盛。",
-    reason: "空腹一段時間了，簡單吃點東西，讓身體慢慢醒過來就好。",
-  },
-  scrollroom: {
-    emoji: "📱", title: "去電腦房滑手機", sub: "換個地方，感覺會不太一樣。",
-    reason: "還躺在床上很容易越滑越久，換個地方，起床會自然一點。",
-  },
-  work: {
-    emoji: "💻", title: "開始今天的工作", sub: "先從最小的一件事開始。",
-    reason: "早上的專注力通常比較好，先做一件小事，開始就不難了。",
-  },
-  lunch: {
-    emoji: "🍽", title: "吃個舒服的午餐", sub: "找個地方，好好坐著吃。",
-    reason: "工作了一個上午，讓自己好好吃頓飯，是很值得的休息。",
-  },
-  walk: {
-    emoji: "🚶", title: "出門散步十分鐘", sub: "不用刻意，晃一晃就好。",
-    reason: "坐了比較久，起來動一動，等等會更容易靜下心。",
-  },
-  skincare: {
-    emoji: "🧴", title: "簡單保養一下", sub: "洗臉、擦乳液，就好。",
-    reason: "一天差不多要結束了，花一點時間照顧自己，慢慢放鬆下來。",
-  },
-  sleep: {
-    emoji: "🌙", title: "準備睡覺了", sub: "放下手機，關燈。",
-    reason: "時間差不多了，讓身體知道，可以慢慢進入休息了。",
-  },
-};
-
-const ENCOURAGEMENTS = [
-  "昨天睡得比較少，今天我們放慢一點。",
-  "很好，一步一步來就好。",
-  "這個步調，感覺還舒服嗎？",
-  "最近的節奏越來越穩定了。",
-  "不用急，今天時間還很多。",
-  "做得很好，剩下的慢慢來。",
-];
-
-function statusForStage(id) {
-  if (["wake", "milktea", "breakfast", "scrollroom"].includes(id)) return { emoji: "🌞", text: "剛起床" };
-  if (id === "work") return { emoji: "💻", text: "工作中" };
-  if (id === "lunch") return { emoji: "🍽", text: "午餐時間" };
-  if (id === "walk") return { emoji: "🚶", text: "外出中" };
-  return { emoji: "🌙", text: "準備睡覺" };
-}
 
 /* ----------------------------------------------------------------------
    Small shared UI primitives
@@ -188,46 +219,352 @@ function SectionLabel({ children, C }) {
   );
 }
 
+function Card({ children, C, style }) {
+  return (
+    <div style={{ background: C.surface, borderRadius: 18, border: `1px solid ${C.border}`, overflow: "hidden", ...style }}>
+      {children}
+    </div>
+  );
+}
+
 function Row({ icon: Icon, iconBg, iconColor, title, value, onClick, C, right, isLast }) {
   return (
-    <div
-      onClick={onClick}
-      style={{
-        display: "flex", alignItems: "center", gap: 12, padding: "13px 14px",
-        borderBottom: isLast ? "none" : `1px solid ${C.border}`,
-        cursor: onClick ? "pointer" : "default",
-      }}
-    >
+    <div onClick={onClick} style={{
+      display: "flex", alignItems: "center", gap: 12, padding: "13px 14px",
+      borderBottom: isLast ? "none" : `1px solid ${C.border}`, cursor: onClick ? "pointer" : "default",
+    }}>
       {Icon && (
-        <div style={{
-          width: 30, height: 30, borderRadius: 9, background: iconBg,
-          display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0,
-        }}>
+        <div style={{ width: 30, height: 30, borderRadius: 9, background: iconBg, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
           <Icon size={16} color={iconColor} strokeWidth={2.2} />
         </div>
       )}
       <div style={{ flex: 1, minWidth: 0 }}>
-        <div style={{ fontFamily: SANS, fontSize: 14.5, fontWeight: 500, color: C.textPrimary }}>
-          {title}
-        </div>
-        {value && (
-          <div style={{ fontFamily: SANS, fontSize: 12.5, color: C.textSecondary, marginTop: 2 }}>
-            {value}
-          </div>
-        )}
+        <div style={{ fontFamily: SANS, fontSize: 14.5, fontWeight: 500, color: C.textPrimary }}>{title}</div>
+        {value && <div style={{ fontFamily: SANS, fontSize: 12.5, color: C.textSecondary, marginTop: 2 }}>{value}</div>}
       </div>
       {right !== undefined ? right : (onClick && <ChevronRight size={16} color={C.textTertiary} />)}
     </div>
   );
 }
 
-function Card({ children, C, style }) {
+function EditableRow({ icon: Icon, iconBg, iconColor, title, value, onSave, C, isLast, placeholder }) {
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState(value || "");
+  useEffect(() => { setDraft(value || ""); }, [value]);
+
+  function commit() {
+    setEditing(false);
+    if (draft !== value) onSave(draft);
+  }
+
   return (
-    <div style={{
-      background: C.surface, borderRadius: 18, border: `1px solid ${C.border}`,
-      overflow: "hidden", ...style,
-    }}>
-      {children}
+    <div style={{ display: "flex", alignItems: "center", gap: 12, padding: "13px 14px", borderBottom: isLast ? "none" : `1px solid ${C.border}` }}>
+      <div style={{ width: 30, height: 30, borderRadius: 9, background: iconBg, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
+        <Icon size={16} color={iconColor} strokeWidth={2.2} />
+      </div>
+      <div style={{ flex: 1, minWidth: 0 }}>
+        <div style={{ fontFamily: SANS, fontSize: 14.5, fontWeight: 500, color: C.textPrimary }}>{title}</div>
+        {editing ? (
+          <input
+            autoFocus value={draft} onChange={(e) => setDraft(e.target.value)} onBlur={commit}
+            onKeyDown={(e) => { if (e.key === "Enter") commit(); if (e.key === "Escape") { setDraft(value || ""); setEditing(false); } }}
+            placeholder={placeholder}
+            style={{ marginTop: 3, width: "100%", border: "none", outline: "none", background: "transparent", borderBottom: `1px solid ${C.accent}`, fontFamily: SANS, fontSize: 12.5, color: C.textPrimary, padding: "2px 0" }}
+          />
+        ) : (
+          <div onClick={() => setEditing(true)} style={{ fontFamily: SANS, fontSize: 12.5, color: value ? C.textSecondary : C.textTertiary, marginTop: 2, cursor: "pointer" }}>
+            {value || placeholder || "點擊設定"}
+          </div>
+        )}
+      </div>
+      {!editing && <Edit3 size={13} color={C.textTertiary} onClick={() => setEditing(true)} style={{ cursor: "pointer", flexShrink: 0 }} />}
+    </div>
+  );
+}
+
+function inputStyle(C) {
+  return {
+    width: "100%", border: `1px solid ${C.border}`, outline: "none", background: C.surface,
+    borderRadius: 10, padding: "9px 11px", fontFamily: SANS, fontSize: 13, color: C.textPrimary,
+  };
+}
+function ghostBtnStyle(C) {
+  return { flex: 1, padding: "10px 0", borderRadius: 999, border: `1px solid ${C.border}`, background: "transparent", color: C.textSecondary, fontFamily: SANS, fontSize: 13, fontWeight: 600, cursor: "pointer" };
+}
+function primaryBtnStyle(C) {
+  return { flex: 1, padding: "10px 0", borderRadius: 999, border: "none", background: C.accent, color: "#fff", fontFamily: SANS, fontSize: 13, fontWeight: 600, cursor: "pointer" };
+}
+
+/* ----------------------------------------------------------------------
+   Journey item form (add / edit)
+---------------------------------------------------------------------- */
+
+function JourneyForm({ initial, onSave, onCancel, C }) {
+  const [label, setLabel] = useState(initial?.label || "");
+  const [emoji, setEmoji] = useState(initial?.emoji || "✨");
+  const [sub, setSub] = useState(initial?.sub || "");
+  const [reason, setReason] = useState(initial?.reason || "");
+  const [iconKey, setIconKey] = useState(initial?.iconKey || "Sparkles");
+  const [phase, setPhase] = useState(initial?.phase || "day");
+
+  function save() {
+    if (!label.trim()) return;
+    onSave({ label: label.trim(), emoji: emoji.trim() || "✨", sub: sub.trim(), reason: reason.trim(), iconKey, phase });
+  }
+
+  return (
+    <div style={{ padding: "14px 12px 16px", background: C.surfaceAlt, borderRadius: 14, marginTop: 8, marginBottom: 10, animation: "fadeSlideUp 0.3s ease" }}>
+      <input value={label} onChange={(e) => setLabel(e.target.value)} placeholder="項目名稱，例如：喝水" style={inputStyle(C)} />
+      <input value={sub} onChange={(e) => setSub(e.target.value)} placeholder="簡短說明（選填）" style={{ ...inputStyle(C), marginTop: 8 }} />
+      <textarea value={reason} onChange={(e) => setReason(e.target.value)} placeholder="為什麼要做這件事（選填）" rows={2}
+        style={{ ...inputStyle(C), marginTop: 8, resize: "none", fontFamily: SANS }} />
+      <div style={{ display: "flex", gap: 8, marginTop: 10, alignItems: "center" }}>
+        <input value={emoji} onChange={(e) => setEmoji(e.target.value.slice(0, 2))} placeholder="🙂"
+          style={{ ...inputStyle(C), width: 52, textAlign: "center", flexShrink: 0 }} />
+        <div style={{ display: "flex", gap: 6, overflowX: "auto" }}>
+          {ICON_OPTIONS.map((key) => {
+            const IconComp = ICONS[key];
+            const active = iconKey === key;
+            return (
+              <button key={key} onClick={() => setIconKey(key)} style={{
+                width: 32, height: 32, borderRadius: 9, flexShrink: 0,
+                border: active ? `1.5px solid ${C.accent}` : `1px solid ${C.border}`,
+                background: active ? C.accentSoft : "transparent", display: "flex",
+                alignItems: "center", justifyContent: "center", cursor: "pointer",
+              }}>
+                <IconComp size={15} color={active ? C.accent : C.textTertiary} />
+              </button>
+            );
+          })}
+        </div>
+      </div>
+      <div style={{ display: "flex", gap: 6, marginTop: 10, flexWrap: "wrap" }}>
+        {PHASE_OPTIONS.map((p) => {
+          const active = phase === p.id;
+          return (
+            <button key={p.id} onClick={() => setPhase(p.id)} style={{
+              padding: "6px 10px", borderRadius: 999, cursor: "pointer",
+              border: active ? `1.5px solid ${C.accent}` : `1px solid ${C.border}`,
+              background: active ? C.accentSoft : "transparent",
+              color: active ? C.accent : C.textSecondary,
+              fontFamily: SANS, fontSize: 11.5, fontWeight: 500,
+            }}>
+              {p.emoji} {p.label}
+            </button>
+          );
+        })}
+      </div>
+      <div style={{ display: "flex", gap: 8, marginTop: 14 }}>
+        <button onClick={onCancel} style={ghostBtnStyle(C)}>取消</button>
+        <button onClick={save} style={primaryBtnStyle(C)}>儲存</button>
+      </div>
+    </div>
+  );
+}
+
+/* ----------------------------------------------------------------------
+   Drag-to-reorder hook (no external deps, uniform row height)
+---------------------------------------------------------------------- */
+
+const ROW_HEIGHT = 54;
+
+function useDragReorder(items, setItems) {
+  const [draggingId, setDraggingId] = useState(null);
+  const [dragY, setDragY] = useState(0);
+  const startIndexRef = useRef(0);
+  const startClientYRef = useRef(0);
+
+  function onPointerDown(id, index, e) {
+    e.preventDefault();
+    setDraggingId(id);
+    startIndexRef.current = index;
+    startClientYRef.current = e.clientY;
+    setDragY(0);
+  }
+
+  useEffect(() => {
+    if (!draggingId) return;
+    function move(e) {
+      const delta = e.clientY - startClientYRef.current;
+      setDragY(delta);
+      const shift = Math.round(delta / ROW_HEIGHT);
+      if (shift === 0) return;
+      setItems((prev) => {
+        const curIndex = prev.findIndex((i) => i.id === draggingId);
+        const newIndex = Math.max(0, Math.min(prev.length - 1, curIndex + shift));
+        if (curIndex === newIndex) return prev;
+        const next = [...prev];
+        const [moved] = next.splice(curIndex, 1);
+        next.splice(newIndex, 0, moved);
+        return next;
+      });
+      startIndexRef.current += shift;
+      startClientYRef.current = e.clientY;
+      setDragY(0);
+    }
+    function up() { setDraggingId(null); setDragY(0); }
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", up);
+    return () => {
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", up);
+    };
+  }, [draggingId, setItems]);
+
+  return { draggingId, dragY, onPointerDown };
+}
+
+/* ----------------------------------------------------------------------
+   Journey manager: a collapsible, editable, draggable list used for
+   both "今天的旅程" and "明天的計畫"
+---------------------------------------------------------------------- */
+
+function JourneyManager({ title, items, setItems, C, showStatus, defaultExpanded, footer }) {
+  const [expanded, setExpanded] = useState(!!defaultExpanded);
+  const [editMode, setEditMode] = useState(false);
+  const [editingId, setEditingId] = useState(null);
+  const { draggingId, dragY, onPointerDown } = useDragReorder(items, setItems);
+
+  function handleDelete(id) {
+    const item = items.find((i) => i.id === id);
+    if (!window.confirm(`要刪除「${item?.label}」嗎？`)) return;
+    setItems((prev) => {
+      const next = prev.filter((i) => i.id !== id);
+      return showStatus ? ensureCurrent(next) : next;
+    });
+  }
+
+  function handleSaveEdit(id, patch) {
+    setItems((prev) => prev.map((i) => (i.id === id ? { ...i, ...patch } : i)));
+    setEditingId(null);
+  }
+
+  function handleAdd(patch) {
+    setItems((prev) => {
+      const next = [...prev, { id: genId(), status: "upcoming", completedAt: null, ...patch }];
+      return showStatus ? ensureCurrent(next) : next;
+    });
+    setEditingId(null);
+  }
+
+  return (
+    <div style={{ marginTop: 18 }}>
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 10, position: "relative" }}>
+        <button
+          onClick={() => setExpanded((e) => !e)}
+          style={{
+            display: "flex", alignItems: "center", justifyContent: "center", gap: 6,
+            background: "transparent", border: "none", cursor: "pointer", padding: "8px 0",
+            fontFamily: SANS, fontSize: 12.5, fontWeight: 500, color: C.textTertiary,
+          }}
+        >
+          <span>{title}</span>
+          <ChevronDown size={13} style={{ transition: "transform 0.3s cubic-bezier(.4,0,.2,1)", transform: expanded ? "rotate(180deg)" : "rotate(0deg)" }} />
+        </button>
+        {expanded && (
+          <button
+            onClick={() => setEditMode((v) => !v)}
+            style={{
+              position: "absolute", right: 4, background: "transparent", border: "none",
+              cursor: "pointer", color: editMode ? C.accent : C.textTertiary, padding: 6,
+            }}
+          >
+            <Edit3 size={13} />
+          </button>
+        )}
+      </div>
+
+      <div style={{ display: "grid", gridTemplateRows: expanded ? "1fr" : "0fr", transition: "grid-template-rows 0.42s cubic-bezier(.4,0,.2,1)" }}>
+        <div style={{ overflow: "hidden", minHeight: 0 }}>
+          <div style={{ position: "relative", padding: "10px 4px 4px" }}>
+            {!editMode && (
+              <div style={{ position: "absolute", left: 19, top: 10, bottom: 24, width: 2, background: C.border, borderRadius: 2 }} />
+            )}
+            {items.map((stage, i) => {
+              const Icon = ICONS[stage.iconKey] || Sparkles;
+              const isDone = stage.status === "done";
+              const isCurrent = stage.status === "current";
+              const isDragging = draggingId === stage.id;
+              const isEditingThis = editingId === stage.id;
+              return (
+                <React.Fragment key={stage.id}>
+                  <div
+                    style={{
+                      display: "flex", alignItems: "center", gap: 12, position: "relative",
+                      marginBottom: 6, minHeight: ROW_HEIGHT - 6,
+                      transform: isDragging ? `translateY(${dragY}px)` : "none",
+                      zIndex: isDragging ? 5 : 1,
+                      opacity: isDragging ? 0.9 : 1,
+                    }}
+                  >
+                    {editMode && (
+                      <div onPointerDown={(e) => onPointerDown(stage.id, i, e)} style={{ cursor: "grab", color: C.textTertiary, touchAction: "none", flexShrink: 0 }}>
+                        <GripVertical size={15} />
+                      </div>
+                    )}
+                    <div style={{
+                      width: 28, height: 28, borderRadius: "50%", flexShrink: 0, zIndex: 1,
+                      display: "flex", alignItems: "center", justifyContent: "center",
+                      background: showStatus && isDone ? C.accent : showStatus && isCurrent ? C.surface : C.phoneBg,
+                      border: showStatus && isCurrent ? `2px solid ${C.accent}` : showStatus && isDone ? "none" : `2px solid ${C.border}`,
+                      transition: "all 0.3s ease",
+                    }}>
+                      {showStatus && isDone ? (
+                        <Check size={13} color="#fff" strokeWidth={3} />
+                      ) : (
+                        <Icon size={12} color={showStatus && isCurrent ? C.accent : C.textTertiary} strokeWidth={2.2} />
+                      )}
+                    </div>
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      <span style={{
+                        fontFamily: SANS, fontSize: 14,
+                        fontWeight: showStatus && isCurrent ? 600 : 400,
+                        color: showStatus && isDone ? C.textSecondary : showStatus && isCurrent ? C.textPrimary : C.textTertiary,
+                        textDecoration: showStatus && isDone ? "line-through" : "none",
+                        textDecorationColor: C.border,
+                      }}>
+                        {stage.label}
+                      </span>
+                      {showStatus && isDone && stage.completedAt && (
+                        <span style={{ fontFamily: SANS, fontSize: 10.5, color: C.textTertiary, marginLeft: 8 }}>
+                          {new Date(stage.completedAt).toLocaleTimeString("zh-TW", { hour: "2-digit", minute: "2-digit" })}
+                        </span>
+                      )}
+                    </div>
+                    {editMode && (
+                      <div style={{ display: "flex", gap: 10, flexShrink: 0 }}>
+                        <Edit3 size={13} color={C.textTertiary} style={{ cursor: "pointer" }} onClick={() => setEditingId(isEditingThis ? null : stage.id)} />
+                        <Trash2 size={13} color={C.danger} style={{ cursor: "pointer" }} onClick={() => handleDelete(stage.id)} />
+                      </div>
+                    )}
+                  </div>
+                  {isEditingThis && (
+                    <JourneyForm C={C} initial={stage} onCancel={() => setEditingId(null)} onSave={(patch) => handleSaveEdit(stage.id, patch)} />
+                  )}
+                </React.Fragment>
+              );
+            })}
+
+            {editMode && editingId !== "new" && (
+              <button
+                onClick={() => setEditingId("new")}
+                style={{
+                  display: "flex", alignItems: "center", justifyContent: "center", gap: 6,
+                  width: "100%", padding: "10px 0", marginTop: 6, borderRadius: 12,
+                  border: `1.3px dashed ${C.border}`, background: "transparent",
+                  color: C.textSecondary, fontFamily: SANS, fontSize: 12.5, fontWeight: 500, cursor: "pointer",
+                }}
+              >
+                <Plus size={13} /> 新增項目
+              </button>
+            )}
+            {editingId === "new" && (
+              <JourneyForm C={C} initial={null} onCancel={() => setEditingId(null)} onSave={handleAdd} />
+            )}
+          </div>
+        </div>
+      </div>
+      {expanded && footer}
     </div>
   );
 }
@@ -236,93 +573,84 @@ function Card({ children, C, style }) {
    Today screen
 ---------------------------------------------------------------------- */
 
-function TodayScreen({ C, theme, journey, setJourney, goals, msgIndex, setMsgIndex }) {
+function TodayScreen({ C, theme, state, setState }) {
   const [checking, setChecking] = useState(false);
   const [exiting, setExiting] = useState(false);
   const [pressed, setPressed] = useState(false);
-  const [expanded, setExpanded] = useState(false);
 
+  const journey = state.todayJourney;
   const currentIdx = journey.findIndex((s) => s.status === "current");
   const current = currentIdx >= 0 ? journey[currentIdx] : null;
   const allDone = currentIdx === -1;
-  const status = statusForStage(current ? current.id : journey[journey.length - 1].id);
-  const detail = current ? TASK_DETAIL[current.id] : null;
+  const status = PHASE_STATUS[(current || journey[journey.length - 1])?.phase || "day"];
 
   const dateLabel = useMemo(() => {
     const d = new Date();
     return d.toLocaleDateString("zh-TW", { month: "long", day: "numeric", weekday: "long" });
-  }, []);
+  }, [state.lastOpenedDate]);
+
+  function setTodayJourney(fn) {
+    setState((prev) => ({ ...prev, todayJourney: typeof fn === "function" ? fn(prev.todayJourney) : fn }));
+  }
+  function setTomorrowJourney(fn) {
+    setState((prev) => ({ ...prev, tomorrowJourney: typeof fn === "function" ? fn(prev.tomorrowJourney) : fn }));
+  }
 
   function handleComplete() {
     if (!current || checking || exiting) return;
     setChecking(true);
     setTimeout(() => setExiting(true), 260);
     setTimeout(() => {
-      setJourney((prev) => {
-        const next = prev.map((s) => ({ ...s }));
+      setState((prev) => {
+        const next = prev.todayJourney.map((s) => ({ ...s }));
         const i = next.findIndex((s) => s.id === current.id);
         next[i].status = "done";
+        next[i].completedAt = new Date().toISOString();
         const followingIdx = next.findIndex((s, idx) => idx > i && s.status === "upcoming");
         if (followingIdx !== -1) next[followingIdx].status = "current";
-        return next;
+        return { ...prev, todayJourney: next, msgIndex: (prev.msgIndex + 1) % ENCOURAGEMENTS.length };
       });
-      setMsgIndex((i) => (i + 1) % ENCOURAGEMENTS.length);
       setChecking(false);
       setExiting(false);
     }, 700);
   }
 
+  function handleSimulateNextDay() {
+    if (!window.confirm("模擬進入明天？今天的旅程會被記錄，明天的計畫會變成新的今天。")) return;
+    setState((prev) => rollToNextDay(prev, { archiveKey: `sim-${Date.now()}`, newDate: todayStr() }));
+  }
+
   const breathe = theme === "dark" ? "breatheDark 3.4s ease-in-out infinite" : "breatheLight 3.4s ease-in-out infinite";
 
   return (
-    <div style={{
-      flex: 1, display: "flex", flexDirection: "column", padding: "14px 24px 26px",
-      animation: "screenIn 0.4s ease",
-    }}>
-      {/* Quiet date, no wordmark, no chrome */}
+    <div style={{ flex: 1, display: "flex", flexDirection: "column", padding: "14px 24px 26px", animation: "screenIn 0.4s ease" }}>
       <div style={{ fontFamily: SANS, fontSize: 12.5, color: C.textTertiary, marginBottom: 28, textAlign: "center" }}>
         {dateLabel}
       </div>
 
-      {/* AI message — the opening line, like a journal entry */}
-      <div style={{ marginBottom: 22, animation: "fadeIn 0.6s ease" }} key={`msg-${msgIndex}`}>
-        <p style={{
-          fontFamily: SERIF, fontSize: 21, lineHeight: 1.6, color: C.textPrimary,
-          margin: 0, fontStyle: "italic", textAlign: "center",
-        }}>
-          {ENCOURAGEMENTS[msgIndex]}
+      <div style={{ marginBottom: 22, animation: "fadeIn 0.6s ease" }} key={`msg-${state.msgIndex}`}>
+        <p style={{ fontFamily: SERIF, fontSize: 21, lineHeight: 1.6, color: C.textPrimary, margin: 0, fontStyle: "italic", textAlign: "center" }}>
+          {ENCOURAGEMENTS[state.msgIndex]}
         </p>
       </div>
 
-      {/* Goals from Discussion, if applied — quiet, no fill */}
-      {goals.length > 0 && (
+      {state.goals.length > 0 && (
         <div style={{ display: "flex", gap: 8, justifyContent: "center", flexWrap: "wrap", marginBottom: 20 }}>
-          {goals.map((g) => (
-            <span key={g} style={{
-              fontFamily: SANS, fontSize: 11.5, color: C.textTertiary,
-              padding: "4px 2px", fontWeight: 500,
-            }}>
+          {state.goals.map((g) => (
+            <span key={g} style={{ fontFamily: SANS, fontSize: 11.5, color: C.textTertiary, padding: "4px 2px", fontWeight: 500 }}>
               🎯 {g}
             </span>
           ))}
         </div>
       )}
 
-      {/* Status — quiet, no color fill */}
-      <div style={{
-        display: "flex", justifyContent: "center", marginBottom: 34,
-      }}>
-        <div style={{
-          display: "inline-flex", alignItems: "center", gap: 7, background: C.surfaceAlt,
-          color: C.textSecondary, padding: "8px 16px", borderRadius: 999,
-          fontFamily: SANS, fontSize: 13, fontWeight: 500,
-        }}>
+      <div style={{ display: "flex", justifyContent: "center", marginBottom: 34 }}>
+        <div style={{ display: "inline-flex", alignItems: "center", gap: 7, background: C.surfaceAlt, color: C.textSecondary, padding: "8px 16px", borderRadius: 999, fontFamily: SANS, fontSize: 13, fontWeight: 500 }}>
           <span>{status.emoji}</span>
           <span>{status.text}</span>
         </div>
       </div>
 
-      {/* The single next-step card — the largest, quietest, most important element */}
       <div style={{ flex: 1, display: "flex", flexDirection: "column", justifyContent: "center" }}>
         {!allDone ? (
           <div
@@ -334,127 +662,50 @@ function TodayScreen({ C, theme, journey, setJourney, goals, msgIndex, setMsgInd
               animation: exiting ? "cardExit 0.42s cubic-bezier(.4,0,.2,1) forwards" : "cardEnter 0.5s cubic-bezier(.4,0,.2,1)",
             }}
           >
-            <div style={{
-              width: 74, height: 74, borderRadius: "50%", background: C.accentSoft,
-              display: "flex", alignItems: "center", justifyContent: "center", fontSize: 32,
-              margin: "0 auto 22px", animation: breathe,
-            }}>
-              {checking ? (
-                <Check size={30} color={C.accent} strokeWidth={3} style={{ animation: "popCheck 0.4s ease" }} />
-              ) : (
-                <span>{detail.emoji}</span>
-              )}
+            <div style={{ width: 74, height: 74, borderRadius: "50%", background: C.accentSoft, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 32, margin: "0 auto 22px", animation: breathe }}>
+              {checking ? <Check size={30} color={C.accent} strokeWidth={3} style={{ animation: "popCheck 0.4s ease" }} /> : <span>{current.emoji}</span>}
             </div>
-
-            <div style={{ fontFamily: SANS, fontSize: 20, fontWeight: 600, color: C.textPrimary, marginBottom: 8 }}>
-              {detail.title}
-            </div>
-            <div style={{ fontFamily: SANS, fontSize: 13.5, color: C.textSecondary, marginBottom: 22 }}>
-              {detail.sub}
-            </div>
-
-            <p style={{
-              fontFamily: SERIF, fontStyle: "italic", fontSize: 14.5, lineHeight: 1.75,
-              color: C.textTertiary, margin: "0 0 28px", padding: "0 6px",
-            }}>
-              {detail.reason}
-            </p>
-
+            <div style={{ fontFamily: SANS, fontSize: 20, fontWeight: 600, color: C.textPrimary, marginBottom: 8 }}>{current.label}</div>
+            <div style={{ fontFamily: SANS, fontSize: 13.5, color: C.textSecondary, marginBottom: 22 }}>{current.sub}</div>
+            {current.reason && (
+              <p style={{ fontFamily: SERIF, fontStyle: "italic", fontSize: 14.5, lineHeight: 1.75, color: C.textTertiary, margin: "0 0 28px", padding: "0 6px" }}>
+                {current.reason}
+              </p>
+            )}
             <button
               onClick={handleComplete}
-              onPointerDown={() => setPressed(true)}
-              onPointerUp={() => setPressed(false)}
-              onPointerLeave={() => setPressed(false)}
+              onPointerDown={() => setPressed(true)} onPointerUp={() => setPressed(false)} onPointerLeave={() => setPressed(false)}
               style={{
-                width: "100%", padding: "14px 0", borderRadius: 999, border: "none",
-                background: C.accent, color: "#fff", fontFamily: SANS, fontSize: 15,
-                fontWeight: 600, cursor: "pointer",
-                transform: pressed ? "scale(0.97)" : "scale(1)",
-                transition: "transform 0.15s ease", letterSpacing: 0.5,
+                width: "100%", padding: "14px 0", borderRadius: 999, border: "none", background: C.accent, color: "#fff",
+                fontFamily: SANS, fontSize: 15, fontWeight: 600, cursor: "pointer",
+                transform: pressed ? "scale(0.97)" : "scale(1)", transition: "transform 0.15s ease", letterSpacing: 0.5,
               }}
             >
               完成
             </button>
           </div>
         ) : (
-          <div style={{
-            background: C.surface, borderRadius: 30, padding: "44px 30px", textAlign: "center",
-            boxShadow: theme === "light" ? "0 2px 24px rgba(40,38,32,0.06)" : "0 2px 24px rgba(0,0,0,0.3)",
-            animation: "cardEnter 0.5s cubic-bezier(.4,0,.2,1)",
-          }}>
+          <div style={{ background: C.surface, borderRadius: 30, padding: "44px 30px", textAlign: "center", boxShadow: theme === "light" ? "0 2px 24px rgba(40,38,32,0.06)" : "0 2px 24px rgba(0,0,0,0.3)", animation: "cardEnter 0.5s cubic-bezier(.4,0,.2,1)" }}>
             <div style={{ fontSize: 32, marginBottom: 14 }}>🌙</div>
-            <div style={{ fontFamily: SERIF, fontStyle: "italic", fontSize: 19, color: C.textPrimary, marginBottom: 6 }}>
-              今天的旅程都完成了。
-            </div>
+            <div style={{ fontFamily: SERIF, fontStyle: "italic", fontSize: 19, color: C.textPrimary, marginBottom: 6 }}>今天的旅程都完成了。</div>
             <div style={{ fontFamily: SANS, fontSize: 13, color: C.textSecondary }}>晚安，好好休息。</div>
           </div>
         )}
       </div>
 
-      {/* Collapsible journey — quiet text toggle, collapsed by default */}
-      <div style={{ marginTop: 30 }}>
-        <button
-          onClick={() => setExpanded((e) => !e)}
-          style={{
-            display: "flex", alignItems: "center", justifyContent: "center", gap: 6,
-            width: "100%", background: "transparent", border: "none", cursor: "pointer",
-            padding: "8px 0", fontFamily: SANS, fontSize: 12.5, fontWeight: 500,
-            color: C.textTertiary,
-          }}
-        >
-          <span>今天的旅程</span>
-          <ChevronDown
-            size={13}
-            style={{ transition: "transform 0.3s cubic-bezier(.4,0,.2,1)", transform: expanded ? "rotate(180deg)" : "rotate(0deg)" }}
-          />
-        </button>
-
-        <div style={{
-          display: "grid",
-          gridTemplateRows: expanded ? "1fr" : "0fr",
-          transition: "grid-template-rows 0.42s cubic-bezier(.4,0,.2,1)",
-        }}>
-          <div style={{ overflow: "hidden", minHeight: 0 }}>
-            <div style={{ position: "relative", padding: "18px 6px 4px" }}>
-              <div style={{
-                position: "absolute", left: 21, top: 10, bottom: 24, width: 2,
-                background: C.border, borderRadius: 2,
-              }} />
-              {journey.map((stage, i) => {
-                const Icon = stage.icon;
-                const isDone = stage.status === "done";
-                const isCurrent = stage.status === "current";
-                return (
-                  <div key={stage.id} style={{ display: "flex", alignItems: "center", gap: 14, marginBottom: i === journey.length - 1 ? 0 : 16, position: "relative" }}>
-                    <div style={{
-                      width: 30, height: 30, borderRadius: "50%", flexShrink: 0, zIndex: 1,
-                      display: "flex", alignItems: "center", justifyContent: "center",
-                      background: isDone ? C.accent : isCurrent ? C.surface : C.phoneBg,
-                      border: isCurrent ? `2px solid ${C.accent}` : isDone ? "none" : `2px solid ${C.border}`,
-                      transition: "all 0.3s ease",
-                    }}>
-                      {isDone ? (
-                        <Check size={14} color="#fff" strokeWidth={3} />
-                      ) : (
-                        <Icon size={13} color={isCurrent ? C.accent : C.textTertiary} strokeWidth={2.2} />
-                      )}
-                    </div>
-                    <span style={{
-                      fontFamily: SANS, fontSize: 14,
-                      fontWeight: isCurrent ? 600 : 400,
-                      color: isDone ? C.textSecondary : isCurrent ? C.textPrimary : C.textTertiary,
-                      textDecoration: isDone ? "line-through" : "none",
-                      textDecorationColor: C.border,
-                    }}>
-                      {stage.label}
-                    </span>
-                  </div>
-                );
-              })}
-            </div>
-          </div>
-        </div>
-      </div>
+      <JourneyManager title="今天的旅程" items={journey} setItems={setTodayJourney} C={C} showStatus defaultExpanded={false} />
+      <JourneyManager
+        title="明天的計畫" items={state.tomorrowJourney} setItems={setTomorrowJourney} C={C} showStatus={false} defaultExpanded={false}
+        footer={
+          <button onClick={handleSimulateNextDay} style={{
+            display: "flex", alignItems: "center", justifyContent: "center", gap: 6, width: "100%",
+            background: "transparent", border: "none", cursor: "pointer", padding: "10px 0 2px",
+            fontFamily: SANS, fontSize: 12, fontWeight: 500, color: C.accent2,
+          }}>
+            模擬進入明天 <ArrowRight size={12} />
+          </button>
+        }
+      />
     </div>
   );
 }
@@ -463,55 +714,49 @@ function TodayScreen({ C, theme, journey, setJourney, goals, msgIndex, setMsgInd
    Discussion screen
 ---------------------------------------------------------------------- */
 
-const SCRIPT = [
-  { role: "ai", text: "最近第一餐都很晚。原因是什麼？" },
-];
-
-function DiscussionScreen({ C, theme, onApply, applied }) {
-  const [messages, setMessages] = useState(SCRIPT);
-  const [step, setStep] = useState(0);
-  const [showUpdate, setShowUpdate] = useState(false);
-  const [input, setInput] = useState("");
+function DiscussionScreen({ C, theme, state, setState }) {
+  const d = state.discussion;
   const scrollRef = useRef(null);
+  const [input, setInput] = useState("");
 
-  useEffect(() => {
-    if (scrollRef.current) scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
-  }, [messages, showUpdate]);
+  useEffect(() => { if (scrollRef.current) scrollRef.current.scrollTop = scrollRef.current.scrollHeight; }, [d.messages, d.showUpdate]);
+
+  function updateDiscussion(patch) {
+    setState((prev) => ({ ...prev, discussion: { ...prev.discussion, ...(typeof patch === "function" ? patch(prev.discussion) : patch) } }));
+  }
 
   const quickReplies = useMemo(() => {
-    if (step === 0) return ["一直躺著滑手機", "工作太忙"];
-    if (step === 1) return ["可以", "再想想"];
+    if (d.step === 0) return ["一直躺著滑手機", "工作太忙"];
+    if (d.step === 1) return ["可以", "再想想"];
     return [];
-  }, [step]);
+  }, [d.step]);
 
   function pushMessage(role, text) {
-    setMessages((m) => [...m, { role, text }]);
+    updateDiscussion((prev) => ({ messages: [...prev.messages, { role, text }] }));
   }
 
   function advance(userText) {
     pushMessage("user", userText);
-    if (step === 0) {
+    if (d.step === 0) {
       setTimeout(() => {
         pushMessage("ai", "如果不要禁止滑手機，改成去電腦房滑，可以嗎？");
-        setStep(1);
+        updateDiscussion({ step: 1 });
       }, 550);
-    } else if (step === 1) {
+    } else if (d.step === 1) {
       if (userText === "可以") {
         setTimeout(() => {
-          pushMessage("ai", "那我們更新你的晨間流程。");
-          setStep(2);
-          setTimeout(() => setShowUpdate(true), 500);
+          pushMessage("ai", "那我們更新你明天的晨間流程。");
+          updateDiscussion({ step: 2 });
+          setTimeout(() => updateDiscussion({ showUpdate: true }), 500);
         }, 550);
       } else {
         setTimeout(() => {
           pushMessage("ai", "沒關係，我們可以再想別的方式。要不要先從「起床先開燈」開始？");
-          setStep(3);
+          updateDiscussion({ step: 3 });
         }, 550);
       }
     } else {
-      setTimeout(() => {
-        pushMessage("ai", "好的，我先記下來，我們晚點再深入聊這個。");
-      }, 550);
+      setTimeout(() => pushMessage("ai", "好的，我先記下來，我們晚點再深入聊這個。"), 550);
     }
   }
 
@@ -522,30 +767,39 @@ function DiscussionScreen({ C, theme, onApply, applied }) {
     advance(text);
   }
 
+  function handleApply() {
+    if (d.applied) return;
+    setState((prev) => {
+      let tomorrow = prev.tomorrowJourney;
+      if (!tomorrow.some((s) => s.id === "scrollroom")) {
+        const i = tomorrow.findIndex((s) => s.id === "milktea");
+        const newItem = {
+          id: "scrollroom", label: "電腦房滑手機", iconKey: "Smartphone", emoji: "📱", phase: "morning",
+          sub: "換個地方，感覺會不太一樣。", reason: "還躺在床上很容易越滑越久，換個地方，起床會自然一點。",
+          status: "upcoming", completedAt: null,
+        };
+        tomorrow = [...tomorrow];
+        tomorrow.splice(i === -1 ? tomorrow.length : i + 1, 0, newItem);
+      }
+      const newGoals = Array.from(new Set([...prev.goals, "減少空腹時間", "縮短賴床時間"]));
+      return { ...prev, tomorrowJourney: tomorrow, goals: newGoals, discussion: { ...prev.discussion, applied: true } };
+    });
+  }
+
   return (
     <div style={{ display: "flex", flexDirection: "column", flex: 1, minHeight: 0, animation: "screenIn 0.35s ease" }}>
       <div style={{ padding: "18px 20px 4px" }}>
         <Eyebrow C={C}>Discussion</Eyebrow>
-        <div style={{ fontFamily: SERIF, fontSize: 22, fontStyle: "italic", color: C.textPrimary }}>
-          一起設計你的生活
-        </div>
+        <div style={{ fontFamily: SERIF, fontSize: 22, fontStyle: "italic", color: C.textPrimary }}>一起設計你的生活</div>
       </div>
 
       <div ref={scrollRef} style={{ flex: 1, overflowY: "auto", padding: "14px 20px" }}>
-        {messages.map((m, i) => (
-          <div
-            key={i}
-            style={{
-              display: "flex", justifyContent: m.role === "ai" ? "flex-start" : "flex-end",
-              marginBottom: 10, animation: "fadeSlideUp 0.3s ease",
-            }}
-          >
+        {d.messages.map((m, i) => (
+          <div key={i} style={{ display: "flex", justifyContent: m.role === "ai" ? "flex-start" : "flex-end", marginBottom: 10, animation: "fadeSlideUp 0.3s ease" }}>
             <div style={{
               maxWidth: "78%", padding: "10px 14px", borderRadius: 16,
-              borderBottomLeftRadius: m.role === "ai" ? 4 : 16,
-              borderBottomRightRadius: m.role === "user" ? 4 : 16,
-              background: m.role === "ai" ? C.aiBubble : C.userBubble,
-              color: m.role === "ai" ? C.textPrimary : C.userBubbleText,
+              borderBottomLeftRadius: m.role === "ai" ? 4 : 16, borderBottomRightRadius: m.role === "user" ? 4 : 16,
+              background: m.role === "ai" ? C.aiBubble : C.userBubble, color: m.role === "ai" ? C.textPrimary : C.userBubbleText,
               fontFamily: SANS, fontSize: 14.5, lineHeight: 1.5,
             }}>
               {m.text}
@@ -556,102 +810,56 @@ function DiscussionScreen({ C, theme, onApply, applied }) {
         {quickReplies.length > 0 && (
           <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginTop: 6, marginBottom: 6 }}>
             {quickReplies.map((q) => (
-              <button
-                key={q}
-                onClick={() => advance(q)}
-                style={{
-                  padding: "8px 14px", borderRadius: 999, border: `1.3px solid ${C.accent2}`,
-                  background: "transparent", color: C.accent2, fontFamily: SANS,
-                  fontSize: 13, fontWeight: 500, cursor: "pointer",
-                }}
-              >
+              <button key={q} onClick={() => advance(q)} style={{
+                padding: "8px 14px", borderRadius: 999, border: `1.3px solid ${C.accent2}`, background: "transparent",
+                color: C.accent2, fontFamily: SANS, fontSize: 13, fontWeight: 500, cursor: "pointer",
+              }}>
                 {q}
               </button>
             ))}
           </div>
         )}
 
-        {showUpdate && (
-          <div style={{
-            marginTop: 14, background: C.surface, border: `1px solid ${C.border}`,
-            borderRadius: 16, padding: 18, animation: "bobIn 0.4s ease",
-          }}>
+        {d.showUpdate && (
+          <div style={{ marginTop: 14, background: C.surface, border: `1px solid ${C.border}`, borderRadius: 16, padding: 18, animation: "bobIn 0.4s ease" }}>
             <div style={{ display: "flex", alignItems: "center", gap: 7, marginBottom: 14 }}>
               <Sparkles size={15} color={C.accent} />
-              <span style={{ fontFamily: SANS, fontSize: 13, fontWeight: 700, color: C.textPrimary }}>
-                本次更新
-              </span>
+              <span style={{ fontFamily: SANS, fontSize: 13, fontWeight: 700, color: C.textPrimary }}>本次更新</span>
             </div>
-
-            <div style={{ fontFamily: SANS, fontSize: 12, fontWeight: 600, color: C.textTertiary, marginBottom: 8, letterSpacing: 0.4 }}>
-              新增
-            </div>
+            <div style={{ fontFamily: SANS, fontSize: 12, fontWeight: 600, color: C.textTertiary, marginBottom: 8, letterSpacing: 0.4 }}>新增（明天生效）</div>
             {["起床後泡奶茶", "去電腦房滑手機"].map((t) => (
               <div key={t} style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 7 }}>
-                <div style={{
-                  width: 18, height: 18, borderRadius: "50%", background: C.accentSoft,
-                  display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0,
-                }}>
+                <div style={{ width: 18, height: 18, borderRadius: "50%", background: C.accentSoft, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
                   <Check size={11} color={C.accent} strokeWidth={3} />
                 </div>
                 <span style={{ fontFamily: SANS, fontSize: 13.5, color: C.textPrimary }}>{t}</span>
               </div>
             ))}
-
-            <div style={{ fontFamily: SANS, fontSize: 12, fontWeight: 600, color: C.textTertiary, margin: "14px 0 8px", letterSpacing: 0.4 }}>
-              目標
-            </div>
-            <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 18 }}>
+            <div style={{ fontFamily: SANS, fontSize: 12, fontWeight: 600, color: C.textTertiary, margin: "14px 0 8px", letterSpacing: 0.4 }}>目標</div>
+            <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 6 }}>
               {["減少空腹時間", "縮短賴床時間"].map((g) => (
-                <span key={g} style={{
-                  fontFamily: SANS, fontSize: 12, color: C.accent2, background: C.accent2Soft,
-                  padding: "5px 11px", borderRadius: 999, fontWeight: 500,
-                }}>
-                  {g}
-                </span>
+                <span key={g} style={{ fontFamily: SANS, fontSize: 12, color: C.accent2, background: C.accent2Soft, padding: "5px 11px", borderRadius: 999, fontWeight: 500 }}>{g}</span>
               ))}
             </div>
-
-            <button
-              onClick={onApply}
-              disabled={applied}
-              style={{
-                width: "100%", padding: "11px 0", borderRadius: 999, border: "none",
-                background: applied ? C.accentSoft : C.accent,
-                color: applied ? C.accent : "#fff",
-                fontFamily: SANS, fontSize: 14, fontWeight: 600,
-                cursor: applied ? "default" : "pointer", transition: "all 0.2s ease",
-              }}
-            >
-              {applied ? "已套用到 Today ✓" : "套用到 Today"}
+            <div style={{ fontFamily: SANS, fontSize: 11.5, color: C.textTertiary, marginBottom: 16 }}>會在明天開始時生效，不影響今天。</div>
+            <button onClick={handleApply} disabled={d.applied} style={{
+              width: "100%", padding: "11px 0", borderRadius: 999, border: "none",
+              background: d.applied ? C.accentSoft : C.accent, color: d.applied ? C.accent : "#fff",
+              fontFamily: SANS, fontSize: 14, fontWeight: 600, cursor: d.applied ? "default" : "pointer", transition: "all 0.2s ease",
+            }}>
+              {d.applied ? "已加入明天的計畫 ✓" : "套用到明天的計畫"}
             </button>
           </div>
         )}
       </div>
 
-      <div style={{
-        display: "flex", alignItems: "center", gap: 8, padding: "10px 16px",
-        borderTop: `1px solid ${C.border}`, background: C.phoneBg,
-      }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "10px 16px", borderTop: `1px solid ${C.border}`, background: C.phoneBg }}>
         <input
-          value={input}
-          onChange={(e) => setInput(e.target.value)}
-          onKeyDown={(e) => e.key === "Enter" && handleSend()}
+          value={input} onChange={(e) => setInput(e.target.value)} onKeyDown={(e) => e.key === "Enter" && handleSend()}
           placeholder="想聊聊什麼？"
-          style={{
-            flex: 1, border: "none", outline: "none", background: C.surfaceAlt,
-            borderRadius: 999, padding: "10px 16px", fontFamily: SANS, fontSize: 14,
-            color: C.textPrimary,
-          }}
+          style={{ flex: 1, border: "none", outline: "none", background: C.surfaceAlt, borderRadius: 999, padding: "10px 16px", fontFamily: SANS, fontSize: 14, color: C.textPrimary }}
         />
-        <button
-          onClick={handleSend}
-          style={{
-            width: 38, height: 38, borderRadius: "50%", border: "none",
-            background: C.accent, color: "#fff", display: "flex", alignItems: "center",
-            justifyContent: "center", cursor: "pointer", flexShrink: 0,
-          }}
-        >
+        <button onClick={handleSend} style={{ width: 38, height: 38, borderRadius: "50%", border: "none", background: C.accent, color: "#fff", display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer", flexShrink: 0 }}>
           <Send size={16} />
         </button>
       </div>
@@ -663,86 +871,90 @@ function DiscussionScreen({ C, theme, onApply, applied }) {
    My Life screen
 ---------------------------------------------------------------------- */
 
-function MyLifeScreen({ C, theme, setTheme }) {
-  const [appleHealth, setAppleHealth] = useState(true);
-  const [googleHealth, setGoogleHealth] = useState(false);
-  const [appleCal, setAppleCal] = useState(true);
-  const [googleCal, setGoogleCal] = useState(false);
-  const [dailyReminder, setDailyReminder] = useState(true);
-  const [quietMode, setQuietMode] = useState(false);
-  const [personality, setPersonality] = useState("gentle");
+function MyLifeScreen({ C, theme, state, setState, onTestNotification }) {
+  const historyDays = Object.keys(state.history).length;
+
+  function setProfileField(key, value) {
+    setState((prev) => ({ ...prev, profile: { ...prev.profile, [key]: value } }));
+  }
+  function setNotif(key, value) {
+    setState((prev) => ({ ...prev, notifications: { ...prev.notifications, [key]: value } }));
+  }
+  function setHealth(key, value) {
+    setState((prev) => ({ ...prev, healthSync: { ...prev.healthSync, [key]: value } }));
+  }
+  function setTheme(t) {
+    setState((prev) => ({ ...prev, theme: t }));
+  }
+  function setPersonality(id) {
+    setState((prev) => ({ ...prev, aiPersonality: id }));
+  }
 
   const personalities = [
-    { id: "gentle", label: "溫柔陪伴" },
-    { id: "coach", label: "理性教練" },
-    { id: "humor", label: "幽默朋友" },
+    { id: "gentle", label: "溫柔陪伴" }, { id: "coach", label: "理性教練" }, { id: "humor", label: "幽默朋友" },
   ];
 
   return (
     <div style={{ padding: "18px 20px 40px", animation: "screenIn 0.35s ease" }}>
       <Eyebrow C={C}>My Life</Eyebrow>
-      <div style={{ fontFamily: SERIF, fontSize: 22, fontStyle: "italic", color: C.textPrimary, marginBottom: 2 }}>
-        我的生活
-      </div>
+      <div style={{ fontFamily: SERIF, fontSize: 22, fontStyle: "italic", color: C.textPrimary, marginBottom: 2 }}>我的生活</div>
       <div style={{ fontFamily: SANS, fontSize: 12.5, color: C.textTertiary }}>
-        AI 認識你的地方
+        {historyDays > 0 ? `AI 已經記錄了 ${historyDays} 天的生活` : "AI 認識你的地方"}
       </div>
 
       <SectionLabel C={C}>個人資訊</SectionLabel>
       <Card C={C}>
-        <Row C={C} icon={UserIcon} iconBg={C.accentSoft} iconColor={C.accent} title="姓名與生日" value="尚未設定" onClick={() => {}} isLast />
+        <EditableRow C={C} icon={UserIcon} iconBg={C.accentSoft} iconColor={C.accent} title="姓名" value={state.profile.name} placeholder="點擊設定姓名" onSave={(v) => setProfileField("name", v)} />
+        <EditableRow C={C} icon={CalendarDays} iconBg={C.accentSoft} iconColor={C.accent} title="生日" value={state.profile.birthday} placeholder="點擊設定生日" onSave={(v) => setProfileField("birthday", v)} isLast />
       </Card>
 
       <SectionLabel C={C}>工作型態</SectionLabel>
       <Card C={C}>
-        <Row C={C} icon={Briefcase} iconBg={C.accent2Soft} iconColor={C.accent2} title="工作型態" value="遠端 · 彈性時間" onClick={() => {}} />
-        <Row C={C} icon={CalendarDays} iconBg={C.accent2Soft} iconColor={C.accent2} title="輪班設定" value="無固定班表" onClick={() => {}} isLast />
+        <EditableRow C={C} icon={Briefcase} iconBg={C.accent2Soft} iconColor={C.accent2} title="工作型態" value={state.profile.workType} onSave={(v) => setProfileField("workType", v)} />
+        <EditableRow C={C} icon={CalendarDays} iconBg={C.accent2Soft} iconColor={C.accent2} title="輪班設定" value={state.profile.shift} onSave={(v) => setProfileField("shift", v)} isLast />
       </Card>
 
       <SectionLabel C={C}>生活偏好</SectionLabel>
       <Card C={C}>
-        <Row C={C} icon={Moon} iconBg={C.accentSoft} iconColor={C.accent} title="睡眠偏好" value="23:30 – 07:30" onClick={() => {}} />
-        <Row C={C} icon={UtensilsCrossed} iconBg={C.accentSoft} iconColor={C.accent} title="飲食偏好" value="少油少糖" onClick={() => {}} />
-        <Row C={C} icon={Ban} iconBg={C.accentSoft} iconColor={C.accent} title="不喜歡的食物" value="香菜、內臟" onClick={() => {}} />
-        <Row C={C} icon={Pill} iconBg={C.accentSoft} iconColor={C.accent} title="保健食品" value="維他命 D、魚油" onClick={() => {}} />
-        <Row C={C} icon={Pill} iconBg={C.accentSoft} iconColor={C.accent} title="固定藥物" value="無" onClick={() => {}} isLast />
+        <EditableRow C={C} icon={Moon} iconBg={C.accentSoft} iconColor={C.accent} title="睡眠偏好" value={state.profile.sleep} onSave={(v) => setProfileField("sleep", v)} />
+        <EditableRow C={C} icon={UtensilsCrossed} iconBg={C.accentSoft} iconColor={C.accent} title="飲食偏好" value={state.profile.diet} onSave={(v) => setProfileField("diet", v)} />
+        <EditableRow C={C} icon={Ban} iconBg={C.accentSoft} iconColor={C.accent} title="不喜歡的食物" value={state.profile.dislikedFoods} onSave={(v) => setProfileField("dislikedFoods", v)} />
+        <EditableRow C={C} icon={Pill} iconBg={C.accentSoft} iconColor={C.accent} title="保健食品" value={state.profile.supplements} onSave={(v) => setProfileField("supplements", v)} />
+        <EditableRow C={C} icon={Pill} iconBg={C.accentSoft} iconColor={C.accent} title="固定藥物" value={state.profile.medications} onSave={(v) => setProfileField("medications", v)} isLast />
       </Card>
 
       <SectionLabel C={C}>健康資料同步</SectionLabel>
       <Card C={C}>
-        <Row C={C} icon={HeartPulse} iconBg={C.accent2Soft} iconColor={C.accent2} title="Apple Health"
-          right={<Toggle checked={appleHealth} onChange={setAppleHealth} C={C} />} />
-        <Row C={C} icon={HeartPulse} iconBg={C.accent2Soft} iconColor={C.accent2} title="Google Health Connect"
-          right={<Toggle checked={googleHealth} onChange={setGoogleHealth} C={C} />} />
-        <Row C={C} icon={CalendarDays} iconBg={C.accent2Soft} iconColor={C.accent2} title="Apple 日曆"
-          right={<Toggle checked={appleCal} onChange={setAppleCal} C={C} />} />
-        <Row C={C} icon={CalendarDays} iconBg={C.accent2Soft} iconColor={C.accent2} title="Google 日曆"
-          right={<Toggle checked={googleCal} onChange={setGoogleCal} C={C} />} isLast />
+        <Row C={C} icon={HeartPulse} iconBg={C.accent2Soft} iconColor={C.accent2} title="Apple Health" right={<Toggle checked={state.healthSync.appleHealth} onChange={(v) => setHealth("appleHealth", v)} C={C} />} />
+        <Row C={C} icon={HeartPulse} iconBg={C.accent2Soft} iconColor={C.accent2} title="Google Health Connect" right={<Toggle checked={state.healthSync.googleHealth} onChange={(v) => setHealth("googleHealth", v)} C={C} />} />
+        <Row C={C} icon={CalendarDays} iconBg={C.accent2Soft} iconColor={C.accent2} title="Apple 日曆" right={<Toggle checked={state.healthSync.appleCal} onChange={(v) => setHealth("appleCal", v)} C={C} />} />
+        <Row C={C} icon={CalendarDays} iconBg={C.accent2Soft} iconColor={C.accent2} title="Google 日曆" right={<Toggle checked={state.healthSync.googleCal} onChange={(v) => setHealth("googleCal", v)} C={C} />} isLast />
       </Card>
 
       <SectionLabel C={C}>通知設定</SectionLabel>
       <Card C={C}>
-        <Row C={C} icon={Bell} iconBg={C.accentSoft} iconColor={C.accent} title="每日訊息提醒" value="只在你想被想起時"
-          right={<Toggle checked={dailyReminder} onChange={setDailyReminder} C={C} />} />
-        <Row C={C} icon={Moon} iconBg={C.accentSoft} iconColor={C.accent} title="安靜模式" value="不打擾，不催促"
-          right={<Toggle checked={quietMode} onChange={setQuietMode} C={C} />} isLast />
+        <Row C={C} icon={Bell} iconBg={C.accentSoft} iconColor={C.accent} title="每日訊息提醒" value="只在你想被想起時" right={<Toggle checked={state.notifications.dailyReminder} onChange={(v) => setNotif("dailyReminder", v)} C={C} />} />
+        <Row C={C} icon={Moon} iconBg={C.accentSoft} iconColor={C.accent} title="安靜模式" value="不打擾，不催促" right={<Toggle checked={state.notifications.quietMode} onChange={(v) => setNotif("quietMode", v)} C={C} />} />
+        <Row
+          C={C} icon={Send} iconBg={C.accentSoft} iconColor={C.accent} title="傳送測試提醒"
+          value={state.notifications.quietMode ? "安靜模式已開啟，暫不提醒" : "看看提醒會長什麼樣子"}
+          onClick={state.notifications.dailyReminder && !state.notifications.quietMode ? onTestNotification : undefined}
+          right={<ChevronRight size={16} color={state.notifications.dailyReminder && !state.notifications.quietMode ? C.textTertiary : C.border} />}
+          isLast
+        />
       </Card>
 
       <SectionLabel C={C}>AI 個性</SectionLabel>
       <Card C={C} style={{ padding: 14 }}>
         <div style={{ display: "flex", gap: 8 }}>
           {personalities.map((p) => (
-            <button
-              key={p.id}
-              onClick={() => setPersonality(p.id)}
-              style={{
-                flex: 1, padding: "10px 4px", borderRadius: 12, cursor: "pointer",
-                border: personality === p.id ? `1.5px solid ${C.accent}` : `1px solid ${C.border}`,
-                background: personality === p.id ? C.accentSoft : "transparent",
-                color: personality === p.id ? C.accent : C.textSecondary,
-                fontFamily: SANS, fontSize: 12.5, fontWeight: 600, transition: "all 0.2s ease",
-              }}
-            >
+            <button key={p.id} onClick={() => setPersonality(p.id)} style={{
+              flex: 1, padding: "10px 4px", borderRadius: 12, cursor: "pointer",
+              border: state.aiPersonality === p.id ? `1.5px solid ${C.accent}` : `1px solid ${C.border}`,
+              background: state.aiPersonality === p.id ? C.accentSoft : "transparent",
+              color: state.aiPersonality === p.id ? C.accent : C.textSecondary,
+              fontFamily: SANS, fontSize: 12.5, fontWeight: 600, transition: "all 0.2s ease",
+            }}>
               {p.label}
             </button>
           ))}
@@ -753,16 +965,12 @@ function MyLifeScreen({ C, theme, setTheme }) {
       <Card C={C} style={{ padding: 6 }}>
         <div style={{ display: "flex", gap: 6 }}>
           {[{ id: "light", label: "☀️ 淺色" }, { id: "dark", label: "🌙 深色" }].map((opt) => (
-            <button
-              key={opt.id}
-              onClick={() => setTheme(opt.id)}
-              style={{
-                flex: 1, padding: "10px 4px", borderRadius: 10, cursor: "pointer", border: "none",
-                background: theme === opt.id ? C.surfaceAlt : "transparent",
-                color: theme === opt.id ? C.textPrimary : C.textTertiary,
-                fontFamily: SANS, fontSize: 13, fontWeight: 600, transition: "all 0.2s ease",
-              }}
-            >
+            <button key={opt.id} onClick={() => setTheme(opt.id)} style={{
+              flex: 1, padding: "10px 4px", borderRadius: 10, cursor: "pointer", border: "none",
+              background: state.theme === opt.id ? C.surfaceAlt : "transparent",
+              color: state.theme === opt.id ? C.textPrimary : C.textTertiary,
+              fontFamily: SANS, fontSize: 13, fontWeight: 600, transition: "all 0.2s ease",
+            }}>
               {opt.label}
             </button>
           ))}
@@ -771,7 +979,15 @@ function MyLifeScreen({ C, theme, setTheme }) {
 
       <SectionLabel C={C}>資料</SectionLabel>
       <Card C={C}>
-        <Row C={C} icon={Download} iconBg={C.accent2Soft} iconColor={C.accent2} title="匯出我的生活資料" onClick={() => {}} />
+        <Row C={C} icon={Download} iconBg={C.accent2Soft} iconColor={C.accent2} title="匯出我的生活資料" onClick={() => {
+          try {
+            const blob = new Blob([JSON.stringify(state, null, 2)], { type: "application/json" });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement("a");
+            a.href = url; a.download = "alongside-data.json"; a.click();
+            URL.revokeObjectURL(url);
+          } catch (e) { /* export unavailable in this environment */ }
+        }} />
         <Row C={C} icon={Upload} iconBg={C.accent2Soft} iconColor={C.accent2} title="匯入資料" onClick={() => {}} isLast />
       </Card>
     </div>
@@ -779,24 +995,14 @@ function MyLifeScreen({ C, theme, setTheme }) {
 }
 
 /* ----------------------------------------------------------------------
-   Shell: status bar + bottom nav + phone frame
+   Shell: status bar + bottom nav + toast + phone frame
 ---------------------------------------------------------------------- */
 
 function StatusBar({ C, theme, setTheme }) {
   return (
-    <div style={{
-      height: 46, display: "flex", alignItems: "center", justifyContent: "space-between",
-      padding: "0 24px", flexShrink: 0, color: C.statusBarText,
-    }}>
+    <div style={{ height: 46, display: "flex", alignItems: "center", justifyContent: "space-between", padding: "0 24px", flexShrink: 0, color: C.statusBarText }}>
       <span style={{ fontFamily: SANS, fontSize: 14, fontWeight: 600 }}>9:41</span>
-      <button
-        onClick={() => setTheme(theme === "light" ? "dark" : "light")}
-        style={{
-          border: "none", background: "transparent", cursor: "pointer",
-          display: "flex", alignItems: "center", color: C.statusBarText, opacity: 0.7,
-        }}
-        aria-label="toggle theme"
-      >
+      <button onClick={() => setTheme(theme === "light" ? "dark" : "light")} style={{ border: "none", background: "transparent", cursor: "pointer", display: "flex", alignItems: "center", color: C.statusBarText, opacity: 0.7 }} aria-label="toggle theme">
         {theme === "light" ? <Moon size={15} /> : <Sun size={15} />}
       </button>
     </div>
@@ -811,34 +1017,21 @@ function BottomNav({ active, setActive, C }) {
   ];
   const idx = tabs.findIndex((t) => t.id === active);
   return (
-    <div style={{
-      display: "flex", position: "relative", borderTop: `1px solid ${C.border}`,
-      background: C.phoneBg, flexShrink: 0, paddingBottom: 10, paddingTop: 6,
-    }}>
-      <div style={{
-        position: "absolute", top: 6, left: `${idx * (100 / 3)}%`, width: `${100 / 3}%`,
-        height: 3, transition: "left 0.32s cubic-bezier(.4,0,.2,1)",
-      }}>
+    <div style={{ display: "flex", position: "relative", borderTop: `1px solid ${C.border}`, background: C.phoneBg, flexShrink: 0, paddingBottom: 10, paddingTop: 6 }}>
+      <div style={{ position: "absolute", top: 6, left: `${idx * (100 / 3)}%`, width: `${100 / 3}%`, height: 3, transition: "left 0.32s cubic-bezier(.4,0,.2,1)" }}>
         <div style={{ width: 26, height: 3, borderRadius: 3, background: C.accent, margin: "0 auto" }} />
       </div>
       {tabs.map((t) => {
         const Icon = t.icon;
         const isActive = t.id === active;
         return (
-          <button
-            key={t.id}
-            onClick={() => setActive(t.id)}
-            style={{
-              flex: 1, background: "transparent", border: "none", cursor: "pointer",
-              display: "flex", flexDirection: "column", alignItems: "center", gap: 4,
-              paddingTop: 8, color: isActive ? C.accent : C.textTertiary,
-              transition: "color 0.25s ease",
-            }}
-          >
+          <button key={t.id} onClick={() => setActive(t.id)} style={{
+            flex: 1, background: "transparent", border: "none", cursor: "pointer",
+            display: "flex", flexDirection: "column", alignItems: "center", gap: 4,
+            paddingTop: 8, color: isActive ? C.accent : C.textTertiary, transition: "color 0.25s ease",
+          }}>
             <Icon size={20} strokeWidth={isActive ? 2.3 : 1.9} />
-            <span style={{ fontFamily: SANS, fontSize: 10.5, fontWeight: isActive ? 600 : 500 }}>
-              {t.label}
-            </span>
+            <span style={{ fontFamily: SANS, fontSize: 10.5, fontWeight: isActive ? 600 : 500 }}>{t.label}</span>
           </button>
         );
       })}
@@ -851,55 +1044,73 @@ function BottomNav({ active, setActive, C }) {
 ---------------------------------------------------------------------- */
 
 export default function App() {
-  const [theme, setTheme] = useState("light");
+  const [state, setState] = useState(createInitialState);
   const [active, setActive] = useState("today");
-  const [journey, setJourney] = useState(INITIAL_JOURNEY);
-  const [goals, setGoals] = useState([]);
-  const [applied, setApplied] = useState(false);
-  const [msgIndex, setMsgIndex] = useState(0);
+  const [toast, setToast] = useState(null);
+  const hydrated = useRef(false);
 
-  const C = COLORS[theme];
+  // hydrate from localStorage on mount, then check for day rollover
+  useEffect(() => {
+    const loaded = loadState();
+    const today = todayStr();
+    if (loaded.lastOpenedDate && loaded.lastOpenedDate !== today) {
+      setState(rollToNextDay(loaded, { newDate: today }));
+    } else if (!loaded.lastOpenedDate) {
+      setState({ ...loaded, lastOpenedDate: today });
+    } else {
+      setState(loaded);
+    }
+    hydrated.current = true;
+  }, []);
 
-  function handleApply() {
-    if (applied) return;
-    setJourney((prev) => {
-      if (prev.some((s) => s.id === "scrollroom")) return prev;
-      const next = [...prev];
-      const i = next.findIndex((s) => s.id === "milktea");
-      next.splice(i + 1, 0, { id: "scrollroom", label: "電腦房滑手機", icon: Smartphone, status: "upcoming" });
-      return next;
-    });
-    setGoals(["減少空腹時間", "縮短賴床時間"]);
-    setApplied(true);
+  // persist on every change (after initial hydration)
+  useEffect(() => {
+    if (!hydrated.current) return;
+    saveState(state);
+  }, [state]);
+
+  const C = COLORS[state.theme];
+
+  function setTheme(t) {
+    setState((prev) => ({ ...prev, theme: t }));
+  }
+
+  function handleTestNotification() {
+    const journey = state.todayJourney;
+    const current = journey.find((s) => s.status === "current");
+    const text = current ? `${current.emoji} 該${current.label}了` : "今天的旅程都完成了 🌙";
+    setToast(text);
+    setTimeout(() => setToast(null), 3400);
   }
 
   return (
-    <div style={{
-      minHeight: "100vh", background: theme === "light" ? "#EDECE7" : "#000",
-      display: "flex", alignItems: "center", justifyContent: "center", padding: 32,
-      transition: "background 0.4s ease",
-    }}>
+    <div style={{ minHeight: "100vh", background: state.theme === "light" ? "#EDECE7" : "#000", display: "flex", alignItems: "center", justifyContent: "center", padding: 32, transition: "background 0.4s ease" }}>
       <GlobalStyle />
       <div style={{
-        width: 390, height: 844, borderRadius: 46, overflow: "hidden",
-        background: C.phoneBg, boxShadow: C.shadow, border: `8px solid ${theme === "light" ? "#1c1c1e" : "#000"}`,
-        display: "flex", flexDirection: "column", position: "relative",
-        transition: "background 0.4s ease",
+        width: 390, height: 844, borderRadius: 46, overflow: "hidden", background: C.phoneBg, boxShadow: C.shadow,
+        border: `8px solid ${state.theme === "light" ? "#1c1c1e" : "#000"}`, display: "flex", flexDirection: "column",
+        position: "relative", transition: "background 0.4s ease",
       }}>
-        <StatusBar C={C} theme={theme} setTheme={setTheme} />
+        <StatusBar C={C} theme={state.theme} setTheme={setTheme} />
+
+        {toast && (
+          <div style={{
+            position: "absolute", top: 54, left: "50%", zIndex: 50, background: C.textPrimary, color: C.phoneBg,
+            padding: "10px 16px", borderRadius: 999, fontFamily: SANS, fontSize: 12.5, fontWeight: 500,
+            animation: "toastIn 0.3s ease", boxShadow: "0 8px 24px rgba(0,0,0,0.25)", whiteSpace: "nowrap",
+          }}>
+            {toast}
+          </div>
+        )}
+
         <div style={{ flex: 1, minHeight: 0, display: "flex", flexDirection: "column", overflow: active === "discussion" ? "hidden" : "auto" }}>
           <div key={active} style={{ flex: 1, minHeight: 0, display: "flex", flexDirection: "column" }}>
-            {active === "today" && (
-              <TodayScreen C={C} theme={theme} journey={journey} setJourney={setJourney} goals={goals} msgIndex={msgIndex} setMsgIndex={setMsgIndex} />
-            )}
-            {active === "discussion" && (
-              <DiscussionScreen C={C} theme={theme} onApply={handleApply} applied={applied} />
-            )}
-            {active === "mylife" && (
-              <MyLifeScreen C={C} theme={theme} setTheme={setTheme} />
-            )}
+            {active === "today" && <TodayScreen C={C} theme={state.theme} state={state} setState={setState} />}
+            {active === "discussion" && <DiscussionScreen C={C} theme={state.theme} state={state} setState={setState} />}
+            {active === "mylife" && <MyLifeScreen C={C} theme={state.theme} state={state} setState={setState} onTestNotification={handleTestNotification} />}
           </div>
         </div>
+
         <BottomNav active={active} setActive={setActive} C={C} />
       </div>
     </div>
