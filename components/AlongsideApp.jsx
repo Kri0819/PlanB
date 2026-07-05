@@ -36,6 +36,12 @@ const COLORS = {
 const SERIF = "'Newsreader', 'Noto Serif TC', serif";
 const SANS = "'Inter', 'Noto Sans TC', -apple-system, sans-serif";
 
+// Apple HIG–flavored spring easings: SPRING has a gentle overshoot for small
+// elements (chips, bubbles, checkmarks); SPRING_SOFT decelerates smoothly
+// with no overshoot, for larger surfaces like the hero card and sheets.
+const SPRING = "cubic-bezier(0.34, 1.56, 0.64, 1)";
+const SPRING_SOFT = "cubic-bezier(0.32, 0.72, 0, 1)";
+
 const ICONS = { Sun, Moon, Coffee, UtensilsCrossed, Briefcase, Footprints, Sparkles, Smartphone, Pill, HeartPulse, Bell, Home };
 const ICON_OPTIONS = ["Sun", "Coffee", "UtensilsCrossed", "Briefcase", "Footprints", "Sparkles", "Moon", "Smartphone", "Pill", "HeartPulse", "Bell", "Home"];
 
@@ -112,7 +118,10 @@ function createInitialState() {
     tomorrowJourney: JOURNEY_TEMPLATE.map((t) => ({ ...t, status: "upcoming", completedAt: null })),
     history: {},
     discussion: {
-      messages: [{ role: "ai", text: "最近第一餐都很晚。原因是什麼？" }],
+      messages: [
+        { role: "ai", text: "我發現你這星期有四天，都是下午兩點才吃第一餐。" },
+        { role: "ai", text: "昨天也是，今天也是。要不要一起想想看？" },
+      ],
       step: 0, showUpdate: false, applied: false,
     },
   };
@@ -313,7 +322,7 @@ function JourneyForm({ initial, onSave, onCancel, C }) {
   }
 
   return (
-    <div style={{ padding: "14px 12px 16px", background: C.surfaceAlt, borderRadius: 14, marginTop: 8, marginBottom: 10, animation: "fadeSlideUp 0.3s ease" }}>
+    <div style={{ padding: "16px 14px 18px", background: C.surfaceAlt, borderRadius: 16, marginTop: 8, marginBottom: 10, animation: `fadeSlideUp 0.5s ${SPRING_SOFT}` }}>
       <input value={label} onChange={(e) => setLabel(e.target.value)} placeholder="項目名稱，例如：喝水" style={inputStyle(C)} />
       <input value={sub} onChange={(e) => setSub(e.target.value)} placeholder="簡短說明（選填）" style={{ ...inputStyle(C), marginTop: 8 }} />
       <textarea value={reason} onChange={(e) => setReason(e.target.value)} placeholder="為什麼要做這件事（選填）" rows={2}
@@ -459,7 +468,7 @@ function JourneyManager({ title, items, setItems, C, showStatus, defaultExpanded
           }}
         >
           <span>{title}</span>
-          <ChevronDown size={13} style={{ transition: "transform 0.3s cubic-bezier(.4,0,.2,1)", transform: expanded ? "rotate(180deg)" : "rotate(0deg)" }} />
+          <ChevronDown size={13} style={{ transition: `transform 0.5s ${SPRING}`, transform: expanded ? "rotate(180deg)" : "rotate(0deg)" }} />
         </button>
         {expanded && (
           <button
@@ -474,7 +483,7 @@ function JourneyManager({ title, items, setItems, C, showStatus, defaultExpanded
         )}
       </div>
 
-      <div style={{ display: "grid", gridTemplateRows: expanded ? "1fr" : "0fr", transition: "grid-template-rows 0.42s cubic-bezier(.4,0,.2,1)" }}>
+      <div style={{ display: "grid", gridTemplateRows: expanded ? "1fr" : "0fr", transition: `grid-template-rows 0.55s ${SPRING_SOFT}` }}>
         <div style={{ overflow: "hidden", minHeight: 0 }}>
           <div style={{ position: "relative", padding: "10px 4px 4px" }}>
             {!editMode && (
@@ -623,12 +632,12 @@ function TodayScreen({ C, theme, state, setState }) {
   const breathe = theme === "dark" ? "breatheDark 3.4s ease-in-out infinite" : "breatheLight 3.4s ease-in-out infinite";
 
   return (
-    <div style={{ flex: 1, display: "flex", flexDirection: "column", padding: "14px 24px 26px", animation: "screenIn 0.4s ease" }}>
+    <div style={{ flex: 1, display: "flex", flexDirection: "column", padding: "16px 26px 28px", animation: `screenIn 0.55s ${SPRING_SOFT}` }}>
       <div style={{ fontFamily: SANS, fontSize: 12.5, color: C.textTertiary, marginBottom: 28, textAlign: "center" }}>
         {dateLabel}
       </div>
 
-      <div style={{ marginBottom: 22, animation: "fadeIn 0.6s ease" }} key={`msg-${state.msgIndex}`}>
+      <div style={{ marginBottom: 26, animation: "fadeIn 0.9s ease-out" }} key={`msg-${state.msgIndex}`}>
         <p style={{ fontFamily: SERIF, fontSize: 21, lineHeight: 1.6, color: C.textPrimary, margin: 0, fontStyle: "italic", textAlign: "center" }}>
           {ENCOURAGEMENTS[state.msgIndex]}
         </p>
@@ -656,19 +665,19 @@ function TodayScreen({ C, theme, state, setState }) {
           <div
             key={current.id}
             style={{
-              background: C.surface, borderRadius: 30, padding: "40px 30px 30px",
-              boxShadow: theme === "light" ? "0 2px 24px rgba(40,38,32,0.06)" : "0 2px 24px rgba(0,0,0,0.3)",
+              background: C.surface, borderRadius: 34, padding: "48px 32px 34px",
+              boxShadow: theme === "light" ? "0 4px 32px rgba(40,38,32,0.07)" : "0 4px 32px rgba(0,0,0,0.35)",
               textAlign: "center",
-              animation: exiting ? "cardExit 0.42s cubic-bezier(.4,0,.2,1) forwards" : "cardEnter 0.5s cubic-bezier(.4,0,.2,1)",
+              animation: exiting ? `cardExit 0.5s ${SPRING_SOFT} forwards` : `cardEnter 0.65s ${SPRING_SOFT}`,
             }}
           >
-            <div style={{ width: 74, height: 74, borderRadius: "50%", background: C.accentSoft, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 32, margin: "0 auto 22px", animation: breathe }}>
-              {checking ? <Check size={30} color={C.accent} strokeWidth={3} style={{ animation: "popCheck 0.4s ease" }} /> : <span>{current.emoji}</span>}
+            <div style={{ width: 92, height: 92, borderRadius: "50%", background: C.accentSoft, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 40, margin: "0 auto 26px", animation: breathe }}>
+              {checking ? <Check size={38} color={C.accent} strokeWidth={3} style={{ animation: `popCheck 0.5s ${SPRING}` }} /> : <span>{current.emoji}</span>}
             </div>
-            <div style={{ fontFamily: SANS, fontSize: 20, fontWeight: 600, color: C.textPrimary, marginBottom: 8 }}>{current.label}</div>
-            <div style={{ fontFamily: SANS, fontSize: 13.5, color: C.textSecondary, marginBottom: 22 }}>{current.sub}</div>
+            <div style={{ fontFamily: SANS, fontSize: 23, fontWeight: 600, color: C.textPrimary, marginBottom: 9 }}>{current.label}</div>
+            <div style={{ fontFamily: SANS, fontSize: 14, color: C.textSecondary, marginBottom: 24 }}>{current.sub}</div>
             {current.reason && (
-              <p style={{ fontFamily: SERIF, fontStyle: "italic", fontSize: 14.5, lineHeight: 1.75, color: C.textTertiary, margin: "0 0 28px", padding: "0 6px" }}>
+              <p style={{ fontFamily: SERIF, fontStyle: "italic", fontSize: 15.5, lineHeight: 1.8, color: C.textTertiary, margin: "0 0 30px", padding: "0 4px" }}>
                 {current.reason}
               </p>
             )}
@@ -676,36 +685,38 @@ function TodayScreen({ C, theme, state, setState }) {
               onClick={handleComplete}
               onPointerDown={() => setPressed(true)} onPointerUp={() => setPressed(false)} onPointerLeave={() => setPressed(false)}
               style={{
-                width: "100%", padding: "14px 0", borderRadius: 999, border: "none", background: C.accent, color: "#fff",
-                fontFamily: SANS, fontSize: 15, fontWeight: 600, cursor: "pointer",
-                transform: pressed ? "scale(0.97)" : "scale(1)", transition: "transform 0.15s ease", letterSpacing: 0.5,
+                width: "100%", padding: "16px 0", borderRadius: 999, border: "none", background: C.accent, color: "#fff",
+                fontFamily: SANS, fontSize: 15.5, fontWeight: 600, cursor: "pointer",
+                transform: pressed ? "scale(0.97)" : "scale(1)", transition: `transform 0.4s ${SPRING}`, letterSpacing: 0.5,
               }}
             >
               完成
             </button>
           </div>
         ) : (
-          <div style={{ background: C.surface, borderRadius: 30, padding: "44px 30px", textAlign: "center", boxShadow: theme === "light" ? "0 2px 24px rgba(40,38,32,0.06)" : "0 2px 24px rgba(0,0,0,0.3)", animation: "cardEnter 0.5s cubic-bezier(.4,0,.2,1)" }}>
-            <div style={{ fontSize: 32, marginBottom: 14 }}>🌙</div>
-            <div style={{ fontFamily: SERIF, fontStyle: "italic", fontSize: 19, color: C.textPrimary, marginBottom: 6 }}>今天的旅程都完成了。</div>
-            <div style={{ fontFamily: SANS, fontSize: 13, color: C.textSecondary }}>晚安，好好休息。</div>
+          <div style={{ background: C.surface, borderRadius: 34, padding: "50px 32px", textAlign: "center", boxShadow: theme === "light" ? "0 4px 32px rgba(40,38,32,0.07)" : "0 4px 32px rgba(0,0,0,0.35)", animation: `cardEnter 0.65s ${SPRING_SOFT}` }}>
+            <div style={{ fontSize: 36, marginBottom: 18 }}>🌙</div>
+            <div style={{ fontFamily: SERIF, fontStyle: "italic", fontSize: 20, color: C.textPrimary, marginBottom: 7 }}>今天的旅程都完成了。</div>
+            <div style={{ fontFamily: SANS, fontSize: 13.5, color: C.textSecondary }}>晚安，好好休息。</div>
           </div>
         )}
       </div>
 
-      <JourneyManager title="今天的旅程" items={journey} setItems={setTodayJourney} C={C} showStatus defaultExpanded={false} />
-      <JourneyManager
-        title="明天的計畫" items={state.tomorrowJourney} setItems={setTomorrowJourney} C={C} showStatus={false} defaultExpanded={false}
-        footer={
-          <button onClick={handleSimulateNextDay} style={{
-            display: "flex", alignItems: "center", justifyContent: "center", gap: 6, width: "100%",
-            background: "transparent", border: "none", cursor: "pointer", padding: "10px 0 2px",
-            fontFamily: SANS, fontSize: 12, fontWeight: 500, color: C.accent2,
-          }}>
-            模擬進入明天 <ArrowRight size={12} />
-          </button>
-        }
-      />
+      <div style={{ marginTop: 44 }}>
+        <JourneyManager title="今天的旅程" items={journey} setItems={setTodayJourney} C={C} showStatus defaultExpanded={false} />
+        <JourneyManager
+          title="明天的計畫" items={state.tomorrowJourney} setItems={setTomorrowJourney} C={C} showStatus={false} defaultExpanded={false}
+          footer={
+            <button onClick={handleSimulateNextDay} style={{
+              display: "flex", alignItems: "center", justifyContent: "center", gap: 6, width: "100%",
+              background: "transparent", border: "none", cursor: "pointer", padding: "10px 0 2px",
+              fontFamily: SANS, fontSize: 12, fontWeight: 500, color: C.accent2,
+            }}>
+              模擬進入明天 <ArrowRight size={12} />
+            </button>
+          }
+        />
+      </div>
     </div>
   );
 }
@@ -726,8 +737,8 @@ function DiscussionScreen({ C, theme, state, setState }) {
   }
 
   const quickReplies = useMemo(() => {
-    if (d.step === 0) return ["一直躺著滑手機", "工作太忙"];
-    if (d.step === 1) return ["可以", "再想想"];
+    if (d.step === 0) return ["最近一直躺著滑手機", "最近比較忙，還沒注意"];
+    if (d.step === 1) return ["可以試試", "再想想"];
     return [];
   }, [d.step]);
 
@@ -738,25 +749,32 @@ function DiscussionScreen({ C, theme, state, setState }) {
   function advance(userText) {
     pushMessage("user", userText);
     if (d.step === 0) {
-      setTimeout(() => {
-        pushMessage("ai", "如果不要禁止滑手機，改成去電腦房滑，可以嗎？");
-        updateDiscussion({ step: 1 });
-      }, 550);
-    } else if (d.step === 1) {
-      if (userText === "可以") {
+      if (userText === "最近一直躺著滑手機") {
         setTimeout(() => {
-          pushMessage("ai", "那我們更新你明天的晨間流程。");
-          updateDiscussion({ step: 2 });
-          setTimeout(() => updateDiscussion({ showUpdate: true }), 500);
-        }, 550);
+          pushMessage("ai", "這樣啊。如果不勉強自己戒手機，換個地方滑呢？像是去電腦房。");
+          updateDiscussion({ step: 1 });
+        }, 600);
       } else {
         setTimeout(() => {
-          pushMessage("ai", "沒關係，我們可以再想別的方式。要不要先從「起床先開燈」開始？");
+          pushMessage("ai", "了解，那我們先不特別調整，只是想讓你知道，我有在留意這件事。");
           updateDiscussion({ step: 3 });
-        }, 550);
+        }, 600);
+      }
+    } else if (d.step === 1) {
+      if (userText === "可以試試") {
+        setTimeout(() => {
+          pushMessage("ai", "好，那我把這個加進明天的計畫。");
+          updateDiscussion({ step: 2 });
+          setTimeout(() => updateDiscussion({ showUpdate: true }), 550);
+        }, 600);
+      } else {
+        setTimeout(() => {
+          pushMessage("ai", "沒關係，不用勉強，你想到再跟我說。");
+          updateDiscussion({ step: 3 });
+        }, 600);
       }
     } else {
-      setTimeout(() => pushMessage("ai", "好的，我先記下來，我們晚點再深入聊這個。"), 550);
+      setTimeout(() => pushMessage("ai", "好，我先記下來，之後我們可以再聊。"), 600);
     }
   }
 
@@ -787,7 +805,7 @@ function DiscussionScreen({ C, theme, state, setState }) {
   }
 
   return (
-    <div style={{ display: "flex", flexDirection: "column", flex: 1, minHeight: 0, animation: "screenIn 0.35s ease" }}>
+    <div style={{ display: "flex", flexDirection: "column", flex: 1, minHeight: 0, animation: `screenIn 0.55s ${SPRING_SOFT}` }}>
       <div style={{ padding: "18px 20px 4px" }}>
         <Eyebrow C={C}>Discussion</Eyebrow>
         <div style={{ fontFamily: SERIF, fontSize: 22, fontStyle: "italic", color: C.textPrimary }}>一起設計你的生活</div>
@@ -795,7 +813,7 @@ function DiscussionScreen({ C, theme, state, setState }) {
 
       <div ref={scrollRef} style={{ flex: 1, overflowY: "auto", padding: "14px 20px" }}>
         {d.messages.map((m, i) => (
-          <div key={i} style={{ display: "flex", justifyContent: m.role === "ai" ? "flex-start" : "flex-end", marginBottom: 10, animation: "fadeSlideUp 0.3s ease" }}>
+          <div key={i} style={{ display: "flex", justifyContent: m.role === "ai" ? "flex-start" : "flex-end", marginBottom: 10, animation: `fadeSlideUp 0.5s ${SPRING_SOFT}`, animationDelay: `${Math.min(i, 2) * 110}ms`, animationFillMode: "backwards" }}>
             <div style={{
               maxWidth: "78%", padding: "10px 14px", borderRadius: 16,
               borderBottomLeftRadius: m.role === "ai" ? 4 : 16, borderBottomRightRadius: m.role === "user" ? 4 : 16,
@@ -821,7 +839,7 @@ function DiscussionScreen({ C, theme, state, setState }) {
         )}
 
         {d.showUpdate && (
-          <div style={{ marginTop: 14, background: C.surface, border: `1px solid ${C.border}`, borderRadius: 16, padding: 18, animation: "bobIn 0.4s ease" }}>
+          <div style={{ marginTop: 14, background: C.surface, border: `1px solid ${C.border}`, borderRadius: 16, padding: 18, animation: `bobIn 0.6s ${SPRING}` }}>
             <div style={{ display: "flex", alignItems: "center", gap: 7, marginBottom: 14 }}>
               <Sparkles size={15} color={C.accent} />
               <span style={{ fontFamily: SANS, fontSize: 13, fontWeight: 700, color: C.textPrimary }}>本次更新</span>
@@ -868,11 +886,66 @@ function DiscussionScreen({ C, theme, state, setState }) {
 }
 
 /* ----------------------------------------------------------------------
+   Insights — derived purely from existing history + today data.
+   No new data is stored; these are just computed at render time.
+---------------------------------------------------------------------- */
+
+function computeInsights(state) {
+  const recordedDays = Object.keys(state.history).length;
+  if (recordedDays === 0) return { recordedDays, ready: false };
+
+  const historyEntries = Object.values(state.history).map((d) => d.entries || []);
+  const todayEntries = state.todayJourney.filter((i) => i.completedAt).map((i) => ({ label: i.label, completedAt: i.completedAt }));
+  const allDays = [...historyEntries, todayEntries];
+
+  const denom = Math.max(state.todayJourney.length, 1);
+  const rates = allDays.map((entries) => entries.length / denom);
+  const avgRate = Math.round((rates.reduce((a, b) => a + b, 0) / rates.length) * 100);
+
+  const freq = {};
+  allDays.forEach((entries) => {
+    const seen = new Set();
+    entries.forEach((e) => {
+      if (!seen.has(e.label)) { freq[e.label] = (freq[e.label] || 0) + 1; seen.add(e.label); }
+    });
+  });
+  const labels = Object.keys(freq).sort((a, b) => freq[b] - freq[a]);
+  const mostStable = labels[0] || null;
+  let mostDelayed = labels.length > 1 ? labels[labels.length - 1] : null;
+  if (mostDelayed === mostStable) mostDelayed = null;
+
+  const firstTimes = allDays
+    .filter((entries) => entries.length > 0)
+    .map((entries) => {
+      const earliest = entries.reduce((a, b) => (new Date(a.completedAt) < new Date(b.completedAt) ? a : b));
+      const t = new Date(earliest.completedAt);
+      return t.getHours() * 60 + t.getMinutes();
+    });
+  let avgFirstTimeLabel = null;
+  if (firstTimes.length) {
+    const avgMin = Math.round(firstTimes.reduce((a, b) => a + b, 0) / firstTimes.length);
+    avgFirstTimeLabel = `${String(Math.floor(avgMin / 60)).padStart(2, "0")}:${String(avgMin % 60).padStart(2, "0")}`;
+  }
+
+  return { recordedDays, ready: true, avgRate, mostStable, mostDelayed, avgFirstTimeLabel };
+}
+
+function InsightCard({ C, label, value, sub }) {
+  return (
+    <div style={{ flex: "1 1 40%", background: C.surfaceAlt, borderRadius: 18, padding: "16px 16px 14px", minWidth: 0 }}>
+      <div style={{ fontFamily: SANS, fontSize: 11.5, color: C.textTertiary, fontWeight: 500, marginBottom: 6 }}>{label}</div>
+      <div style={{ fontFamily: SERIF, fontSize: 19, fontStyle: "italic", color: C.textPrimary, lineHeight: 1.3 }}>{value}</div>
+      {sub && <div style={{ fontFamily: SANS, fontSize: 11, color: C.textTertiary, marginTop: 4 }}>{sub}</div>}
+    </div>
+  );
+}
+
+/* ----------------------------------------------------------------------
    My Life screen
 ---------------------------------------------------------------------- */
 
 function MyLifeScreen({ C, theme, state, setState, onTestNotification }) {
-  const historyDays = Object.keys(state.history).length;
+  const insights = useMemo(() => computeInsights(state), [state.history, state.todayJourney]);
 
   function setProfileField(key, value) {
     setState((prev) => ({ ...prev, profile: { ...prev.profile, [key]: value } }));
@@ -895,11 +968,32 @@ function MyLifeScreen({ C, theme, state, setState, onTestNotification }) {
   ];
 
   return (
-    <div style={{ padding: "18px 20px 40px", animation: "screenIn 0.35s ease" }}>
+    <div style={{ padding: "18px 20px 40px", animation: `screenIn 0.55s ${SPRING_SOFT}` }}>
       <Eyebrow C={C}>My Life</Eyebrow>
       <div style={{ fontFamily: SERIF, fontSize: 22, fontStyle: "italic", color: C.textPrimary, marginBottom: 2 }}>我的生活</div>
-      <div style={{ fontFamily: SANS, fontSize: 12.5, color: C.textTertiary }}>
-        {historyDays > 0 ? `AI 已經記錄了 ${historyDays} 天的生活` : "AI 認識你的地方"}
+      <div style={{ fontFamily: SANS, fontSize: 12.5, color: C.textTertiary, marginBottom: 22 }}>AI 認識你的地方</div>
+
+      <SectionLabel C={C}>AI 知道的你</SectionLabel>
+      {!insights.ready ? (
+        <Card C={C} style={{ padding: "22px 20px", background: C.surfaceAlt, border: "none" }}>
+          <div style={{ fontFamily: SERIF, fontStyle: "italic", fontSize: 15, color: C.textSecondary, lineHeight: 1.7 }}>
+            才剛開始認識你。陪你多過幾天，這裡會慢慢出現屬於你的觀察。
+          </div>
+        </Card>
+      ) : (
+        <div style={{ display: "flex", flexWrap: "wrap", gap: 10 }}>
+          <InsightCard C={C} label="已經同行" value={`${insights.recordedDays} 天`} />
+          <InsightCard C={C} label="最近完成率" value={`${insights.avgRate}%`} />
+          {insights.mostStable && <InsightCard C={C} label="最穩定完成" value={insights.mostStable} />}
+          {insights.mostDelayed && <InsightCard C={C} label="最容易拖延" value={insights.mostDelayed} />}
+          {insights.avgFirstTimeLabel && <InsightCard C={C} label="平均開始時間" value={insights.avgFirstTimeLabel} sub="第一件完成的事" />}
+        </div>
+      )}
+
+      <div style={{ marginTop: 40, marginBottom: 4, textAlign: "center" }}>
+        <div style={{ fontFamily: SANS, fontSize: 11.5, fontWeight: 600, letterSpacing: 1.2, textTransform: "uppercase", color: C.textTertiary }}>
+          設定
+        </div>
       </div>
 
       <SectionLabel C={C}>個人資訊</SectionLabel>
@@ -1097,7 +1191,7 @@ export default function App() {
           <div style={{
             position: "absolute", top: 54, left: "50%", zIndex: 50, background: C.textPrimary, color: C.phoneBg,
             padding: "10px 16px", borderRadius: 999, fontFamily: SANS, fontSize: 12.5, fontWeight: 500,
-            animation: "toastIn 0.3s ease", boxShadow: "0 8px 24px rgba(0,0,0,0.25)", whiteSpace: "nowrap",
+            animation: `toastIn 0.5s ${SPRING}`, boxShadow: "0 8px 24px rgba(0,0,0,0.25)", whiteSpace: "nowrap",
           }}>
             {toast}
           </div>
