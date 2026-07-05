@@ -163,10 +163,11 @@ function rollToNextDay(state, opts) {
    Global style
 ---------------------------------------------------------------------- */
 
-const GlobalStyle = () => (
+const GlobalStyle = ({ bg }) => (
   <style>{`
     @import url('https://fonts.googleapis.com/css2?family=Newsreader:ital,wght@0,400;0,500;1,400;1,500&family=Inter:wght@400;500;600;700&display=swap');
     * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+    html, body, #__next { height: 100%; margin: 0; padding: 0; overscroll-behavior: none; background: ${bg || "#FBFAF8"}; }
     ::-webkit-scrollbar { display: none; }
     @keyframes fadeSlideUp { from { opacity:0; transform:translateY(14px);} to { opacity:1; transform:translateY(0);} }
     @keyframes fadeIn { from { opacity:0;} to { opacity:1;} }
@@ -1089,17 +1090,26 @@ function MyLifeScreen({ C, theme, state, setState, onTestNotification }) {
 }
 
 /* ----------------------------------------------------------------------
-   Shell: status bar + bottom nav + toast + phone frame
+   Shell: real full-screen app — no decorative phone frame.
+   Bottom nav is pinned with safe-area support; the fake status bar is
+   gone (the real device/browser already shows one), replaced by a small
+   floating theme toggle.
 ---------------------------------------------------------------------- */
 
-function StatusBar({ C, theme, setTheme }) {
+function ThemeQuickToggle({ theme, setTheme, C }) {
   return (
-    <div style={{ height: 46, display: "flex", alignItems: "center", justifyContent: "space-between", padding: "0 24px", flexShrink: 0, color: C.statusBarText }}>
-      <span style={{ fontFamily: SANS, fontSize: 14, fontWeight: 600 }}>9:41</span>
-      <button onClick={() => setTheme(theme === "light" ? "dark" : "light")} style={{ border: "none", background: "transparent", cursor: "pointer", display: "flex", alignItems: "center", color: C.statusBarText, opacity: 0.7 }} aria-label="toggle theme">
-        {theme === "light" ? <Moon size={15} /> : <Sun size={15} />}
-      </button>
-    </div>
+    <button
+      onClick={() => setTheme(theme === "light" ? "dark" : "light")}
+      aria-label="toggle theme"
+      style={{
+        position: "absolute", top: "calc(env(safe-area-inset-top) + 10px)", right: 16, zIndex: 40,
+        width: 34, height: 34, borderRadius: "50%", border: "none",
+        background: C.surfaceAlt, color: C.textSecondary, opacity: 0.9,
+        display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer",
+      }}
+    >
+      {theme === "light" ? <Moon size={15} /> : <Sun size={15} />}
+    </button>
   );
 }
 
@@ -1111,8 +1121,11 @@ function BottomNav({ active, setActive, C }) {
   ];
   const idx = tabs.findIndex((t) => t.id === active);
   return (
-    <div style={{ display: "flex", position: "relative", borderTop: `1px solid ${C.border}`, background: C.phoneBg, flexShrink: 0, paddingBottom: 10, paddingTop: 6 }}>
-      <div style={{ position: "absolute", top: 6, left: `${idx * (100 / 3)}%`, width: `${100 / 3}%`, height: 3, transition: "left 0.32s cubic-bezier(.4,0,.2,1)" }}>
+    <div style={{
+      display: "flex", position: "relative", borderTop: `1px solid ${C.border}`, background: C.phoneBg,
+      flexShrink: 0, paddingTop: 6, paddingBottom: "calc(env(safe-area-inset-bottom) + 10px)",
+    }}>
+      <div style={{ position: "absolute", top: 6, left: `${idx * (100 / 3)}%`, width: `${100 / 3}%`, height: 3, transition: `left 0.45s ${SPRING_SOFT}` }}>
         <div style={{ width: 26, height: 3, borderRadius: 3, background: C.accent, margin: "0 auto" }} />
       </div>
       {tabs.map((t) => {
@@ -1122,7 +1135,7 @@ function BottomNav({ active, setActive, C }) {
           <button key={t.id} onClick={() => setActive(t.id)} style={{
             flex: 1, background: "transparent", border: "none", cursor: "pointer",
             display: "flex", flexDirection: "column", alignItems: "center", gap: 4,
-            paddingTop: 8, color: isActive ? C.accent : C.textTertiary, transition: "color 0.25s ease",
+            paddingTop: 8, color: isActive ? C.accent : C.textTertiary, transition: "color 0.3s ease",
           }}>
             <Icon size={20} strokeWidth={isActive ? 2.3 : 1.9} />
             <span style={{ fontFamily: SANS, fontSize: 10.5, fontWeight: isActive ? 600 : 500 }}>{t.label}</span>
@@ -1178,35 +1191,37 @@ export default function App() {
   }
 
   return (
-    <div style={{ minHeight: "100vh", background: state.theme === "light" ? "#EDECE7" : "#000", display: "flex", alignItems: "center", justifyContent: "center", padding: 32, transition: "background 0.4s ease" }}>
-      <GlobalStyle />
-      <div style={{
-        width: 390, height: 844, borderRadius: 46, overflow: "hidden", background: C.phoneBg, boxShadow: C.shadow,
-        border: `8px solid ${state.theme === "light" ? "#1c1c1e" : "#000"}`, display: "flex", flexDirection: "column",
-        position: "relative", transition: "background 0.4s ease",
-      }}>
-        <StatusBar C={C} theme={state.theme} setTheme={setTheme} />
+    <div style={{
+      position: "fixed", inset: 0, background: C.phoneBg, display: "flex", flexDirection: "column",
+      overflow: "hidden", transition: "background 0.4s ease",
+    }}>
+      <GlobalStyle bg={C.phoneBg} />
+      <ThemeQuickToggle theme={state.theme} setTheme={setTheme} C={C} />
 
-        {toast && (
-          <div style={{
-            position: "absolute", top: 54, left: "50%", zIndex: 50, background: C.textPrimary, color: C.phoneBg,
-            padding: "10px 16px", borderRadius: 999, fontFamily: SANS, fontSize: 12.5, fontWeight: 500,
-            animation: `toastIn 0.5s ${SPRING}`, boxShadow: "0 8px 24px rgba(0,0,0,0.25)", whiteSpace: "nowrap",
-          }}>
-            {toast}
-          </div>
-        )}
-
-        <div style={{ flex: 1, minHeight: 0, display: "flex", flexDirection: "column", overflow: active === "discussion" ? "hidden" : "auto" }}>
-          <div key={active} style={{ flex: 1, minHeight: 0, display: "flex", flexDirection: "column" }}>
-            {active === "today" && <TodayScreen C={C} theme={state.theme} state={state} setState={setState} />}
-            {active === "discussion" && <DiscussionScreen C={C} theme={state.theme} state={state} setState={setState} />}
-            {active === "mylife" && <MyLifeScreen C={C} theme={state.theme} state={state} setState={setState} onTestNotification={handleTestNotification} />}
-          </div>
+      {toast && (
+        <div style={{
+          position: "absolute", top: "calc(env(safe-area-inset-top) + 14px)", left: "50%", zIndex: 50,
+          background: C.textPrimary, color: C.phoneBg, padding: "10px 16px", borderRadius: 999,
+          fontFamily: SANS, fontSize: 12.5, fontWeight: 500, animation: `toastIn 0.5s ${SPRING}`,
+          boxShadow: "0 8px 24px rgba(0,0,0,0.25)", whiteSpace: "nowrap",
+        }}>
+          {toast}
         </div>
+      )}
 
-        <BottomNav active={active} setActive={setActive} C={C} />
+      <div style={{
+        flex: 1, minHeight: 0, display: "flex", flexDirection: "column",
+        paddingTop: "env(safe-area-inset-top)",
+        overflow: active === "discussion" ? "hidden" : "auto",
+      }}>
+        <div key={active} style={{ flex: 1, minHeight: 0, display: "flex", flexDirection: "column" }}>
+          {active === "today" && <TodayScreen C={C} theme={state.theme} state={state} setState={setState} />}
+          {active === "discussion" && <DiscussionScreen C={C} theme={state.theme} state={state} setState={setState} />}
+          {active === "mylife" && <MyLifeScreen C={C} theme={state.theme} state={state} setState={setState} onTestNotification={handleTestNotification} />}
+        </div>
       </div>
+
+      <BottomNav active={active} setActive={setActive} C={C} />
     </div>
   );
 }
