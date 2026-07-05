@@ -62,14 +62,59 @@ const PHASE_STATUS = {
   day: { emoji: "🌤", text: "忙碌中" },
 };
 
-const ENCOURAGEMENTS = [
-  "昨天睡得比較少，今天我們放慢一點。",
-  "很好，一步一步來就好。",
+// Fallback lines when no stronger signal applies yet (e.g. very first day,
+// no streak, mid-progress with nothing notable) — picked deterministically
+// by day-of-year so it still feels calm and non-random, just quietly varied.
+const FALLBACK_LINES = [
+  "慢慢來就好，不用急。",
   "這個步調，感覺還舒服嗎？",
-  "最近的節奏越來越穩定了。",
   "不用急，今天時間還很多。",
-  "做得很好，剩下的慢慢來。",
+  "一步一步來就好。",
 ];
+
+function dayOfYear(d) {
+  const start = new Date(d.getFullYear(), 0, 0);
+  return Math.floor((d - start) / 86400000);
+}
+
+// Consecutive real calendar days (today counts if something's been
+// completed today) with at least one completed item. Only counts real
+// rollovers, not manual "模擬進入明天" days — that button is for demoing,
+// not for inflating a streak that's supposed to reflect real life.
+function computeStreak(state) {
+  const now = new Date();
+  const hasToday = state.todayJourney.some((i) => i.completedAt);
+  let streak = hasToday ? 1 : 0;
+  for (let back = 1; back < 365; back++) {
+    const dt = new Date(now);
+    dt.setDate(dt.getDate() - back);
+    const key = `${dt.getFullYear()}-${dt.getMonth() + 1}-${dt.getDate()}`;
+    const day = state.history[key];
+    if (day && day.entries && day.entries.length > 0) streak += 1;
+    else break;
+  }
+  return streak;
+}
+
+function computeGreeting(state) {
+  const now = new Date();
+  const hour = now.getHours();
+  const journey = state.todayJourney;
+  const completedToday = journey.filter((i) => i.completedAt).length;
+  const total = journey.length;
+  const allDone = completedToday > 0 && completedToday >= total;
+  const streak = computeStreak(state);
+
+  if (allDone) return "今天都完成了，剩下的時間好好休息。";
+  if (streak >= 5) return `已經連續 ${streak} 天了，這個節奏很穩定。`;
+  if (streak >= 2 && completedToday === 0 && hour < 11) return `連續 ${streak} 天了，今天也慢慢開始就好。`;
+  if (completedToday === 0 && hour < 11) return FALLBACK_LINES[dayOfYear(now) % FALLBACK_LINES.length];
+  if (completedToday === 0 && hour >= 11 && hour < 17) return "今天比較忙也沒關係，現在開始也可以。";
+  if (completedToday === 0 && hour >= 17) return "晚一點開始，也是開始。";
+  if (completedToday === 1) return "開始了，很好。";
+  if (completedToday > 1) return `已經完成 ${completedToday} 件事了，繼續這個步調就好。`;
+  return FALLBACK_LINES[dayOfYear(now) % FALLBACK_LINES.length];
+}
 
 const JOURNEY_TEMPLATE = [
   { id: "wake", label: "起床", iconKey: "Sun", emoji: "🌞", phase: "morning", sub: "新的一天開始了。", reason: "先讓自己醒過來就好，不用急著做什麼。" },
@@ -113,7 +158,6 @@ function createInitialState() {
     notifications: { dailyReminder: true, quietMode: false },
     healthSync: { appleHealth: true, googleHealth: false, appleCal: true, googleCal: false },
     goals: [],
-    msgIndex: 0,
     todayJourney: JOURNEY_TEMPLATE.map((t, i) => ({ ...t, status: i === 0 ? "current" : "upcoming", completedAt: null })),
     tomorrowJourney: JOURNEY_TEMPLATE.map((t) => ({ ...t, status: "upcoming", completedAt: null })),
     history: {},
@@ -147,6 +191,21 @@ function saveState(state) {
   }
 }
 
+// When a new day begins, decide what Discussion should say. If the last
+// conversation actually changed something (applied a plan update) and we
+// haven't followed up yet, the AI checks back in — a short, real reason to
+// open Discussion again instead of finding yesterday's finished chat.
+// Otherwise the conversation is left untouched (still worth having).
+function nextDiscussionState(discussion) {
+  if (discussion.applied && !discussion.followedUp) {
+    return {
+      messages: [{ role: "ai", text: "這幾天的晨間流程，感覺怎麼樣？" }],
+      step: "followup0", showUpdate: false, applied: true, followedUp: true,
+    };
+  }
+  return discussion;
+}
+
 function rollToNextDay(state, opts) {
   const { archiveKey, newDate } = opts || {};
   const entries = state.todayJourney.filter((i) => i.completedAt).map((i) => ({ id: i.id, label: i.label, completedAt: i.completedAt }));
@@ -155,7 +214,8 @@ function rollToNextDay(state, opts) {
   const newTomorrow = newToday.map((t) => ({ ...t, status: "upcoming", completedAt: null }));
   return {
     ...state, history, todayJourney: newToday, tomorrowJourney: newTomorrow,
-    lastOpenedDate: newDate || todayStr(), msgIndex: 0,
+    discussion: nextDiscussionState(state.discussion),
+    lastOpenedDate: newDate || todayStr(),
   };
 }
 
@@ -179,6 +239,7 @@ const GlobalStyle = ({ bg }) => (
     @keyframes cardEnter { 0% { opacity:0; transform: translateY(22px) scale(0.98);} 100% { opacity:1; transform: translateY(0) scale(1);} }
     @keyframes cardExit { 0% { opacity:1; transform: translateY(0) scale(1);} 100% { opacity:0; transform: translateY(-26px) scale(0.98);} }
     @keyframes toastIn { from { opacity:0; transform: translate(-50%,-10px);} to { opacity:1; transform: translate(-50%,0);} }
+    @keyframes typingDot { 0%, 60%, 100% { opacity: 0.25; transform: translateY(0);} 30% { opacity: 1; transform: translateY(-2px);} }
   `}</style>
 );
 
@@ -599,6 +660,8 @@ function TodayScreen({ C, theme, state, setState }) {
     return d.toLocaleDateString("zh-TW", { month: "long", day: "numeric", weekday: "long" });
   }, [state.lastOpenedDate]);
 
+  const greeting = useMemo(() => computeGreeting(state), [state.todayJourney, state.history, state.lastOpenedDate]);
+
   function setTodayJourney(fn) {
     setState((prev) => ({ ...prev, todayJourney: typeof fn === "function" ? fn(prev.todayJourney) : fn }));
   }
@@ -618,7 +681,7 @@ function TodayScreen({ C, theme, state, setState }) {
         next[i].completedAt = new Date().toISOString();
         const followingIdx = next.findIndex((s, idx) => idx > i && s.status === "upcoming");
         if (followingIdx !== -1) next[followingIdx].status = "current";
-        return { ...prev, todayJourney: next, msgIndex: (prev.msgIndex + 1) % ENCOURAGEMENTS.length };
+        return { ...prev, todayJourney: next };
       });
       setChecking(false);
       setExiting(false);
@@ -638,9 +701,9 @@ function TodayScreen({ C, theme, state, setState }) {
         {dateLabel}
       </div>
 
-      <div style={{ marginBottom: 26, animation: "fadeIn 0.9s ease-out" }} key={`msg-${state.msgIndex}`}>
+      <div style={{ marginBottom: 26, animation: "fadeIn 0.9s ease-out" }} key={greeting}>
         <p style={{ fontFamily: SERIF, fontSize: 21, lineHeight: 1.6, color: C.textPrimary, margin: 0, fontStyle: "italic", textAlign: "center" }}>
-          {ENCOURAGEMENTS[state.msgIndex]}
+          {greeting}
         </p>
       </div>
 
@@ -730,8 +793,9 @@ function DiscussionScreen({ C, theme, state, setState }) {
   const d = state.discussion;
   const scrollRef = useRef(null);
   const [input, setInput] = useState("");
+  const [typing, setTyping] = useState(false);
 
-  useEffect(() => { if (scrollRef.current) scrollRef.current.scrollTop = scrollRef.current.scrollHeight; }, [d.messages, d.showUpdate]);
+  useEffect(() => { if (scrollRef.current) scrollRef.current.scrollTop = scrollRef.current.scrollHeight; }, [d.messages, d.showUpdate, typing]);
 
   function updateDiscussion(patch) {
     setState((prev) => ({ ...prev, discussion: { ...prev.discussion, ...(typeof patch === "function" ? patch(prev.discussion) : patch) } }));
@@ -740,6 +804,7 @@ function DiscussionScreen({ C, theme, state, setState }) {
   const quickReplies = useMemo(() => {
     if (d.step === 0) return ["最近一直躺著滑手機", "最近比較忙，還沒注意"];
     if (d.step === 1) return ["可以試試", "再想想"];
+    if (d.step === "followup0") return ["好很多", "普通，再看看"];
     return [];
   }, [d.step]);
 
@@ -751,35 +816,55 @@ function DiscussionScreen({ C, theme, state, setState }) {
     pushMessage("user", userText);
     if (d.step === 0) {
       if (userText === "最近一直躺著滑手機") {
+        setTyping(true);
         setTimeout(() => {
+          setTyping(false);
           pushMessage("ai", "這樣啊。如果不勉強自己戒手機，換個地方滑呢？像是去電腦房。");
           updateDiscussion({ step: 1 });
-        }, 600);
+        }, 900);
       } else {
+        setTyping(true);
         setTimeout(() => {
+          setTyping(false);
           pushMessage("ai", "了解，那我們先不特別調整，只是想讓你知道，我有在留意這件事。");
           updateDiscussion({ step: 3 });
-        }, 600);
+        }, 900);
       }
     } else if (d.step === 1) {
       if (userText === "可以試試") {
+        setTyping(true);
         setTimeout(() => {
+          setTyping(false);
           pushMessage("ai", "好，那我把這個加進明天的計畫。");
           updateDiscussion({ step: 2 });
           setTimeout(() => updateDiscussion({ showUpdate: true }), 550);
-        }, 600);
+        }, 900);
       } else {
+        setTyping(true);
         setTimeout(() => {
+          setTyping(false);
           pushMessage("ai", "沒關係，不用勉強，你想到再跟我說。");
           updateDiscussion({ step: 3 });
-        }, 600);
+        }, 900);
       }
+    } else if (d.step === "followup0") {
+      setTyping(true);
+      setTimeout(() => {
+        setTyping(false);
+        pushMessage("ai", userText === "好很多" ? "太好了，那就先維持這樣。" : "沒關係，我們可以再一起調整看看。");
+        updateDiscussion({ step: "followupEnd" });
+      }, 900);
     } else {
-      setTimeout(() => pushMessage("ai", "好，我先記下來，之後我們可以再聊。"), 600);
+      setTyping(true);
+      setTimeout(() => {
+        setTyping(false);
+        pushMessage("ai", "好，我先記下來，之後我們可以再聊。");
+      }, 900);
     }
   }
 
   function handleSend() {
+    if (typing) return;
     const text = input.trim();
     if (!text) return;
     setInput("");
@@ -826,7 +911,23 @@ function DiscussionScreen({ C, theme, state, setState }) {
           </div>
         ))}
 
-        {quickReplies.length > 0 && (
+        {typing && (
+          <div style={{ display: "flex", justifyContent: "flex-start", marginBottom: 10, animation: `fadeSlideUp 0.4s ${SPRING_SOFT}` }}>
+            <div style={{
+              display: "flex", gap: 4, alignItems: "center", padding: "12px 16px", borderRadius: 16,
+              borderBottomLeftRadius: 4, background: C.aiBubble,
+            }}>
+              {[0, 1, 2].map((i) => (
+                <span key={i} style={{
+                  width: 5, height: 5, borderRadius: "50%", background: C.textTertiary,
+                  animation: "typingDot 1.2s ease-in-out infinite", animationDelay: `${i * 0.15}s`,
+                }} />
+              ))}
+            </div>
+          </div>
+        )}
+
+        {quickReplies.length > 0 && !typing && (
           <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginTop: 6, marginBottom: 6 }}>
             {quickReplies.map((q) => (
               <button key={q} onClick={() => advance(q)} style={{
@@ -875,10 +976,10 @@ function DiscussionScreen({ C, theme, state, setState }) {
       <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "10px 16px", borderTop: `1px solid ${C.border}`, background: C.phoneBg }}>
         <input
           value={input} onChange={(e) => setInput(e.target.value)} onKeyDown={(e) => e.key === "Enter" && handleSend()}
-          placeholder="想聊聊什麼？"
-          style={{ flex: 1, border: "none", outline: "none", background: C.surfaceAlt, borderRadius: 999, padding: "10px 16px", fontFamily: SANS, fontSize: 14, color: C.textPrimary }}
+          placeholder="想聊聊什麼？" disabled={typing}
+          style={{ flex: 1, border: "none", outline: "none", background: C.surfaceAlt, borderRadius: 999, padding: "10px 16px", fontFamily: SANS, fontSize: 14, color: C.textPrimary, opacity: typing ? 0.6 : 1 }}
         />
-        <button onClick={handleSend} style={{ width: 38, height: 38, borderRadius: "50%", border: "none", background: C.accent, color: "#fff", display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer", flexShrink: 0 }}>
+        <button onClick={handleSend} disabled={typing} style={{ width: 38, height: 38, borderRadius: "50%", border: "none", background: C.accent, color: "#fff", display: "flex", alignItems: "center", justifyContent: "center", cursor: typing ? "default" : "pointer", flexShrink: 0, opacity: typing ? 0.6 : 1 }}>
           <Send size={16} />
         </button>
       </div>
