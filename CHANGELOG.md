@@ -1,85 +1,71 @@
-# v0.1.0 — Memory
+# v0.1.1 — Chat Intelligence & Memory Classification
 
-AI 開始真正認識使用者。這個版本沒有新頁面、沒有改版面風格、沒有新動畫、
-沒有新設定，所有時間都花在「記憶」這件事的資料與邏輯上。全部資料仍然只
-存在同一個 localStorage blob 裡（`alongside_state_v1` 這把 key 沒變），
-從 v1 結構自動 migrate 成 v2，不會清掉使用者原本的 Journey／個人資料。
+提升 Discussion 對自由對話的理解能力。這次沒有動 Memory Engine、
+Confidence、Timeline、Observation、Relationship 的資料結構——只重構「訊息
+進來之後，AI 怎麼決定要做什麼」這條流程。舊版本檔案（v0.1.0 及之前）都
+沒有被覆蓋，全部保留在各自的版本檔名底下。
 
-## 1. Memory Engine（最高優先）
-新增 `memory.entries`：每一筆記憶都有
+## 一、Memory Classifier
+新增 `classifyMessage(text, state)`，每一則「自由輸入」的訊息（不是預設
+的快速回覆按鈕）送出後，會先分類成四種意圖之一，再決定要怎麼處理：
 
-- `content`（內容）
-- `confidence`（信心值，0–100）
-- `lastUpdate`（最後更新時間）
-- `source`（`discussion` / `journey_pattern`）
-- `status`（`active` / `archived`）
+| 意圖 | 判斷方式 | 處理 |
+|---|---|---|
+| `modify` | 出現「其實／後來／改成」等修正語氣，且新值與現有資料不同 | 直接更新 + 顯示卡片 |
+| `info` | 符合任一直接事實規則 | 直接更新 + 顯示卡片 |
+| `question` | 以「？」結尾或「為什麼／怎麼／要不要」開頭 | 只回覆，不更新 |
+| `chitchat` | 以上皆非 | 只回覆，不更新 |
 
-分類對應你列的六種：生活習慣、工作型態、偏好、不喜歡、最近狀態、長期變化
-（`MEMORY_CATEGORIES`），各自有自己的衰退速率設定。
+重要：快速回覆按鈕（milktea／電腦房那組導引式對話）完全走原本的腳本
+（`advanceScripted`），分類器只作用在使用者自己打字的內容
+（`advanceFreeText`），兩者互不干擾。
 
-## 2. About You 自動更新
-Discussion 裡如果直接說出關於自己的事實（例如「我最近很常加班」「我討厭
-香菜」「我每天都十一點睡」），會立刻寫進 Memory，同時直接更新 About You
-對應的欄位（工作型態／不喜歡的食物／睡眠偏好）——不用使用者自己再去設定
-頁打字，欄位本身還是原本的 EditableRow，AI 填的內容一樣可以手動修改。
+## 二、擴充 My Life 自動分類規則
+`detectDirectStatement()` 從原本 3 條規則擴充到涵蓋你列的完整對照表：
 
-## 3. 先詢問，再永久記住
-凡是 AI 自己「推論」出來、而不是使用者直接說出口的判斷（目前規則：從
-Journey 完成紀錄中偵測到高頻率但主觀的偏好，例如奶茶／咖啡／散步），一律
-不會直接寫入，而是先在 Discussion 出現一張確認卡：
+- 姓名／暱稱 → 個人資訊
+- 生日 → 個人資訊
+- 睡眠時間 → 生活偏好（睡眠偏好）
+- 工作型態／加班／很忙／在職產業 → 工作型態
+- 不喜歡吃 X → 生活偏好（不喜歡的食物）
+- 每天喝／吃 X（習慣） → 生活偏好（飲食偏好）
+- 固定吃魚油／維他命／B群等 → 生活偏好（保健食品）
+- 固定服藥 → 生活偏好（固定藥物）
+- 正在減肥／瘦身／戒⋯ → 記錄為 Memory（最近狀態），沒有對應欄位可寫就不
+  勉強塞一個，只留在 Memory 裡
 
-> 💡 我發現：你好像很喜歡奶茶。要不要讓我記住？
-> 〔記住〕〔不用〕
+新增 `PROFILE_FIELD_META`，讓每個欄位知道自己屬於 About You 的哪個分區
+（個人資訊／工作型態／生活偏好），這是 Memory Update Card 顯示位置的依據。
 
-按「記住」才會真的變成 Memory；按「不用」會記下這個推論被拒絕過，之後
-不會馬上重複問同一件事，也不會硬套資料。
+## 三、直接事實立即更新，不再每次都問
+`info` 與 `modify` 兩種意圖都會立刻寫入（`applyDirectStatement`），完全
+不會跳出「要不要記住？」。回覆也改成自然的一句話（「好，我記下來了。」／
+修正時是「好，幫你更新一下。」），不會機械式重複同一句話。
 
-## 4. Memory Timeline
-About You 頁面新增「最近更新」，列出最近的新增／更新／移除／封存紀錄
-（`memory.timeline`，最多保留 40 筆），完全由 AI 自己在背景維護，不需要
-使用者手動操作。
+## 四、推測型內容維持原本的確認機制
+AI 自己從行為模式推論出來的東西（`detectInferredCandidate`，例如從
+Journey 完成紀錄看出高頻率的奶茶／咖啡／散步）完全沒有改動，一樣只會先
+跳出 💡 確認卡片，使用者按「記住」才會真的存。這次刻意沒有讓分類器去做
+「從聊天內容猜測」這件事——用力猜測使用者話裡沒直接講的事，风险比效益大，
+維持只從真實行為模式做推論這個原則。
 
-## 5. Observation ↔ Memory
-「推論」在被確認前，本質上就是一個 Observation（暫時、待驗證），只有
-使用者按下「記住」才會升級成正式 Memory；使用者也可以在 About You 直接
-把任何一筆 Memory「忘記」（封存），等於把它退回未確認狀態。
+## 五、新增 Memory Update Card
+只要一則訊息成功更新了 About You 的某個欄位，聊天室就會多一張卡片：
 
-## 6. Memory 會衰退
-生活習慣／工作型態／最近狀態／長期變化這幾類會隨時間衰退信心值
-（`getEffectiveConfidence`，依類別有不同衰退速率，例如「最近狀態」衰退
-最快、「長期變化」最慢）；低於門檻（15%）會在下次開啟 App 時自動封存進
-Timeline，不會無限期占著一筆過期的「事實」。偏好／不喜歡兩類預設不衰退
-——不喜歡香菜這種事通常不會因為沒提起就失效。
+```
+✓ 已更新 About You
+生活偏好
+• 不喜歡的食物：不喜歡香菜
+```
 
-## 7. Relationship（內部使用，不顯示在畫面上）
-新增 `relationship`：對話次數、首次／最近互動時間、記憶被接受／拒絕的
-次數。`computeRelationshipSummary()` 可以算出聊天頻率、接受建議比例、
-一個簡單的信任分數，目前純粹是資料基礎，還沒有拿來改變 AI 的說話方式
-——這部分老實說目前只是打底，等之後真的要用時不需要重新設計資料結構。
+不再只有一句「好，我記住了」——卡片會準確告訴使用者「更新了哪一區、哪個
+欄位、變成什麼值」。`discussion.messages` 的訊息物件多了一個可選的
+`type: "card"` 欄位（連同 `section`/`label`/`value`）；沒有這個欄位的舊
+訊息一樣以純文字泡泡呈現，完全向下相容。
 
-## 8. About You（原 My Life）
-分頁名稱從「My Life」改成「About You」（頁內標題「關於你」），因為這裡
-現在放的是 AI 整理過的東西，不是設定頁。原本的個人資訊等設定內容維持
-不動，只是被放在更準確的名字底下。
-
-## 9. 隱私分層（資料結構先行，尚未做加密）
-狀態物件在概念上分成四層，並在程式碼開頭寫清楚對應關係，方便之後真的要
-做端對端加密時，不用重新設計資料模型：
-
-- `chatLayer` → discussion（原始對話）
-- `memoryLayer` → memory, relationship（AI 整理過的知識）
-- `lifeLayer` → todayJourney, tomorrowJourney, goals, history
-- `profileLayer` → profile, aiPersonality, notifications, healthSync, theme
-
-新增 `encryption: { enabled: false }` 作為保留欄位。老實說：這次沒有把
-整個物件實際巢狀重寫成四層（那會動到全部畫面的每一處讀取，風險大於現在
-的效益），而是先用清楚的分類註解＋獨立的頂層欄位命名把邊界畫出來。等真
-的要接加密時，這個分類就是重構的地圖，不用重新盤點一次資料在哪裡。
-
-## 這次沒做、也刻意沒做的事
-- 沒有新增頁面
-- 沒有改版面或視覺風格（Memory／Timeline 用的是既有的 Card／Row／按鈕樣式）
-- 沒有新增動畫語彙（沿用既有的 SPRING／SPRING_SOFT／bobIn）
-- 沒有新增設定項目
-- 沒有做真正的端對端加密（明確保留給未來）
-- Relationship 資料先打底，還沒有真的拿去改變 AI 的語氣或行為
+## 六、沒有動到的部分
+Memory Engine（`memory.entries` 形狀）、Confidence／衰退邏輯
+（`getEffectiveConfidence`／`runMemoryDecay`）、Timeline
+（`memory.timeline`）、Observation↔Memory（`pendingConfirmation` 機制）、
+Relationship（`relationship` 物件與 `computeRelationshipSummary`）全部
+維持 v0.1.0 的資料結構與行為，一個欄位都沒有改。

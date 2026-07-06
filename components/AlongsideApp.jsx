@@ -7,10 +7,12 @@ import {
 } from "lucide-react";
 
 /* ----------------------------------------------------------------------
-   同行｜Alongside — v0.1.0 "Memory"
-   AI 開始真正認識使用者：Memory Engine（含信心值、衰退、Observation↔Memory、
-   Timeline）、Discussion 直接／經同意寫入 Memory 並自動更新 About You、
-   Relationship（內部使用）、以及為未來加密分層預留的資料結構。
+   同行｜Alongside — v0.1.1 "Chat Intelligence & Memory Classification"
+   自由對話現在先經過 Memory Classifier 分類（聊天／提供資訊／詢問／修改），
+   再決定要不要回覆、要不要寫入 Memory、要不要更新 About You、要不要先問過
+   使用者。直接陳述的事實會立刻更新並顯示 Memory Update Card；AI 自己的
+   推論仍然維持 v0.1.0 的行為，一定要先詢問。Memory Engine／Confidence／
+   Timeline／Observation／Relationship 資料結構完全未變動。
 ---------------------------------------------------------------------- */
 
 const STORAGE_KEY = "alongside_state_v1";
@@ -242,44 +244,156 @@ function runMemoryDecay(state) {
   return changed ? { ...state, memory: { ...state.memory, entries, timeline } } : state;
 }
 
+// Maps a profile field to where it lives in the About You UI, so the
+// Memory Update Card can tell the person exactly what changed and where.
+const PROFILE_FIELD_META = {
+  name: { section: "個人資訊", label: "姓名" },
+  birthday: { section: "個人資訊", label: "生日" },
+  workType: { section: "工作型態", label: "工作型態" },
+  shift: { section: "工作型態", label: "輪班設定" },
+  sleep: { section: "生活偏好", label: "睡眠偏好" },
+  diet: { section: "生活偏好", label: "飲食偏好" },
+  dislikedFoods: { section: "生活偏好", label: "不喜歡的食物" },
+  supplements: { section: "生活偏好", label: "保健食品" },
+  medications: { section: "生活偏好", label: "固定藥物" },
+};
+
 // Things the person states directly about themselves in Discussion get
-// remembered right away — no need to ask, they said it outright.
+// remembered right away — no need to ask, they said it outright. Each
+// rule returns { field?, value?, appendField?, category?, content?,
+// confidence? }. `field` routes into the matching About You section;
+// `category` (when present) also creates/reinforces a Memory entry —
+// omitted for plain identity facts (name/birthday) that don't need
+// confidence/decay bookkeeping, since they simply don't change on their
+// own the way a habit or work situation does.
 function detectDirectStatement(text) {
-  const sleepMatch = text.match(/(\d{1,2})[:：]?(\d{2})?\s*點半?\s*睡/);
-  if (sleepMatch && /每天|通常|習慣|都/.test(text)) {
-    const hh = sleepMatch[1].padStart(2, "0");
-    const mm = sleepMatch[2] || (text.includes("半") ? "30" : "00");
+  let m;
+
+  m = text.match(/(?:我叫|我的名字是|叫我)([^\s，。！？,.!?]{1,10})/);
+  if (m) return { field: "name", value: m[1] };
+
+  m = text.match(/我(?:的)?生日(?:是|在)?\s*(\d{1,2}月\d{1,2}[日號])/);
+  if (m) return { field: "birthday", value: m[1] };
+
+  m = text.match(/(\d{1,2})[:：]?(\d{2})?\s*點半?\s*睡/);
+  if (m && /每天|通常|習慣|都|固定/.test(text)) {
+    const hh = m[1].padStart(2, "0");
+    const mm = m[2] || (text.includes("半") ? "30" : "00");
     return { category: "habit", content: `習慣 ${hh}:${mm} 睡覺`, confidence: 90, field: "sleep", value: `${hh}:${mm}` };
   }
-  if (/加班/.test(text)) {
-    return { category: "work", content: "最近常常加班", confidence: 85, field: "workType", value: "最近常常加班" };
-  }
-  if (/很忙|忙翻|忙死|忙不過來/.test(text)) {
-    return { category: "work", content: "最近工作比較忙碌", confidence: 82, field: "workType", value: "最近比較忙碌" };
-  }
-  const dislikeMatch = text.match(/(?:討厭|不喜歡|不吃)([^\s，。！？,.!?]{1,6})/);
-  if (dislikeMatch) {
-    const item = dislikeMatch[1];
-    return { category: "dislike", content: `不喜歡${item}`, confidence: 88, field: "dislikedFoods", value: item, appendField: true };
-  }
+
+  m = text.match(/我(?:現在)?在([^\s，。！？,.!?]{1,8}業)/);
+  if (m) return { category: "work", content: `工作領域：${m[1]}`, confidence: 88, field: "workType", value: m[1] };
+  if (/加班/.test(text)) return { category: "work", content: "最近常常加班", confidence: 85, field: "workType", value: "最近常常加班" };
+  if (/很忙|忙翻|忙死|忙不過來/.test(text)) return { category: "work", content: "最近工作比較忙碌", confidence: 82, field: "workType", value: "最近比較忙碌" };
+
+  if (/固定服藥|固定吃藥/.test(text)) return { category: "habit", content: "固定服藥", confidence: 90, field: "medications", value: "固定服藥", appendField: true };
+  m = text.match(/固定(?:服用|吃)([^\s，。！？,.!?]{1,10}藥[^\s，。！？,.!?]{0,4})/);
+  if (m) return { category: "habit", content: `固定服用${m[1]}`, confidence: 90, field: "medications", value: m[1], appendField: true };
+
+  m = text.match(/固定(?:吃|服用)([^\s，。！？,.!?]{0,4}(?:魚油|維他命[^\s，。！？,.!?]{0,3}|B群|益生菌|鈣片|葉黃素)[^\s，。！？,.!?]{0,4})/);
+  if (m) return { category: "habit", content: `固定吃${m[1]}`, confidence: 90, field: "supplements", value: m[1], appendField: true };
+
+  m = text.match(/(?:討厭|不喜歡|不吃)([^\s，。！？,.!?]{1,6})/);
+  if (m) return { category: "dislike", content: `不喜歡${m[1]}`, confidence: 88, field: "dislikedFoods", value: m[1], appendField: true };
+
+  m = text.match(/每天(?:都)?(?:喝|吃)([^\s，。！？,.!?]{1,6})/);
+  if (m) return { category: "habit", content: `每天喝${m[1]}`, confidence: 80, field: "diet", value: `每天喝${m[1]}`, appendField: true };
+
+  m = text.match(/正在(減肥|瘦身|戒[^\s，。！？,.!?]{1,4}|調整作息)/);
+  if (m) return { category: "recent_state", content: `目前${m[1]}中` };
+
   return null;
 }
 
+// Applies a detected statement to state, returning both the new state and
+// a small report of what actually changed — used to render the Memory
+// Update Card so the person sees exactly what got written, not just a
+// vague "got it".
 function applyDirectStatement(state, statement) {
-  let next = upsertMemory(state, { category: statement.category, content: statement.content, confidence: statement.confidence, source: "discussion" });
+  let next = state;
+  if (statement.category && statement.content) {
+    next = upsertMemory(next, { category: statement.category, content: statement.content, confidence: statement.confidence || 80, source: "discussion" });
+  }
+  let changed = null;
   if (statement.field) {
+    const meta = PROFILE_FIELD_META[statement.field];
     const profile = { ...next.profile };
+    let displayValue = statement.value;
     if (statement.appendField) {
       const existingVal = profile[statement.field] || "";
       if (!existingVal.includes(statement.value)) {
         profile[statement.field] = existingVal ? `${existingVal}、${statement.value}` : statement.value;
       }
+      displayValue = profile[statement.field];
     } else {
       profile[statement.field] = statement.value;
     }
     next = { ...next, profile };
+    if (meta) changed = { section: meta.section, label: meta.label, value: displayValue };
   }
-  return next;
+  return { state: next, changed };
+}
+
+// Correction language ("其實", "後來", "改成"...) plus a successfully
+// extracted fact, where the new value actually differs from what's
+// already stored — treated as an edit to existing info, not a fresh
+// fact, so the AI can acknowledge it as a correction.
+const MODIFY_CUES = /其實|後來|現在改|已經改|不再|改成/;
+
+function detectModification(text, state) {
+  if (!MODIFY_CUES.test(text)) return null;
+  const statement = detectDirectStatement(text);
+  if (!statement || !statement.field) return null;
+  const prevValue = state.profile[statement.field];
+  if (!statement.appendField && prevValue === statement.value) return null;
+  return statement;
+}
+
+/* ----------------------------------------------------------------------
+   Memory Classifier (v0.1.1)
+
+   Every free-text message the person types gets classified before the AI
+   decides how to respond — this only applies to typed input, not the
+   guided quick-reply demo (those buttons still drive their own scripted
+   flow exactly as before). Four intents:
+
+     modify   — correcting something already known           -> apply + card
+     info     — stating a new fact about themselves directly  -> apply + card
+     question — asking the AI something                       -> just reply
+     chitchat — everything else (small talk, feelings, etc.)  -> just reply
+
+   Inference (the AI noticing a *pattern*, e.g. "you seem to like milk
+   tea") is intentionally NOT part of this text classifier — that comes
+   from actual behavior in Journey/history via detectInferredCandidate,
+   unchanged from v0.1.0, and still always goes through the confirmation
+   card rather than being auto-applied.
+---------------------------------------------------------------------- */
+
+function classifyMessage(text, state) {
+  const modification = detectModification(text, state);
+  if (modification) return { intent: "modify", statement: modification };
+
+  const direct = detectDirectStatement(text);
+  if (direct) return { intent: "info", statement: direct };
+
+  const trimmed = text.trim();
+  if (/[?？]$/.test(trimmed) || /^(為什麼|怎麼|要不要|可以嗎|該不該|是不是)/.test(trimmed)) {
+    return { intent: "question" };
+  }
+
+  return { intent: "chitchat" };
+}
+
+function chitchatReply(text) {
+  if (/^(嗨|哈囉|你好|hi|hello)/i.test(text.trim())) return "嗨，最近過得還好嗎？";
+  if (/累|辛苦|煩|壓力/.test(text)) return "聽起來有點累，要不要休息一下？";
+  if (/開心|不錯|很好|順利/.test(text)) return "聽起來今天不錯，很替你開心。";
+  return "嗯嗯，我在聽，想多聊聊嗎？";
+}
+
+function questionReply() {
+  return "這個我還沒辦法很肯定地回答你，但我會把這個問題放在心上。";
 }
 
 // Patterns the AI notices on its own (from what's actually been completed
@@ -1047,19 +1161,15 @@ function DiscussionScreen({ C, theme, state, setState }) {
     updateDiscussion((prev) => ({ messages: [...prev.messages, { role, text }] }));
   }
 
-  function advance(userText) {
-    pushMessage("user", userText);
+  function pushCard(changed) {
+    updateDiscussion((prev) => ({ messages: [...prev.messages, { role: "ai", type: "card", ...changed }] }));
+  }
 
-    const statement = detectDirectStatement(userText);
-    if (statement) {
-      setState((prev) => applyDirectStatement(prev, statement));
-      setTyping(true);
-      setTimeout(() => {
-        setTyping(false);
-        pushMessage("ai", `好，我記下來了：${statement.content}`);
-      }, 900);
-      return;
-    }
+  // Quick-reply chips still drive the existing guided demo exactly as
+  // before — untouched from v0.1.0/v0.0.4, since that's an existing
+  // feature the classifier shouldn't interfere with.
+  function advanceScripted(userText) {
+    pushMessage("user", userText);
 
     if (d.step === 0) {
       if (userText === "最近一直躺著滑手機") {
@@ -1110,12 +1220,47 @@ function DiscussionScreen({ C, theme, state, setState }) {
     }
   }
 
+  // Typed free text goes through the Memory Classifier: figure out what
+  // kind of message this is, then decide whether to reply, update
+  // Memory, update About You, or ask for confirmation — not the same
+  // flow for every message.
+  function advanceFreeText(userText) {
+    pushMessage("user", userText);
+    const classification = classifyMessage(userText, state);
+
+    if (classification.intent === "info" || classification.intent === "modify") {
+      const { statement } = classification;
+      let changed = null;
+      setState((prev) => {
+        const result = applyDirectStatement(prev, statement);
+        changed = result.changed;
+        return result.state;
+      });
+      setTyping(true);
+      setTimeout(() => {
+        setTyping(false);
+        pushMessage("ai", classification.intent === "modify" ? "好，幫你更新一下。" : "好，我記下來了。");
+        if (changed) pushCard(changed);
+      }, 900);
+      return;
+    }
+
+    if (classification.intent === "question") {
+      setTyping(true);
+      setTimeout(() => { setTyping(false); pushMessage("ai", questionReply()); }, 900);
+      return;
+    }
+
+    setTyping(true);
+    setTimeout(() => { setTyping(false); pushMessage("ai", chitchatReply(userText)); }, 900);
+  }
+
   function handleSend() {
     if (typing) return;
     const text = input.trim();
     if (!text) return;
     setInput("");
-    advance(text);
+    advanceFreeText(text);
   }
 
   function handleApply() {
@@ -1174,18 +1319,34 @@ function DiscussionScreen({ C, theme, state, setState }) {
       </div>
 
       <div ref={scrollRef} style={{ flex: 1, overflowY: "auto", padding: "14px 20px" }}>
-        {d.messages.map((m, i) => (
-          <div key={i} style={{ display: "flex", justifyContent: m.role === "ai" ? "flex-start" : "flex-end", marginBottom: 10, animation: `fadeSlideUp 0.5s ${SPRING_SOFT}`, animationDelay: `${Math.min(i, 2) * 110}ms`, animationFillMode: "backwards" }}>
-            <div style={{
-              maxWidth: "78%", padding: "10px 14px", borderRadius: 16,
-              borderBottomLeftRadius: m.role === "ai" ? 4 : 16, borderBottomRightRadius: m.role === "user" ? 4 : 16,
-              background: m.role === "ai" ? C.aiBubble : C.userBubble, color: m.role === "ai" ? C.textPrimary : C.userBubbleText,
-              fontFamily: SANS, fontSize: 14.5, lineHeight: 1.5,
-            }}>
-              {m.text}
+        {d.messages.map((m, i) => {
+          if (m.type === "card") {
+            return (
+              <div key={i} style={{ display: "flex", justifyContent: "flex-start", marginBottom: 10, animation: `fadeSlideUp 0.5s ${SPRING_SOFT}` }}>
+                <div style={{ maxWidth: "82%", background: C.accentSoft, borderRadius: 14, padding: "12px 15px" }}>
+                  <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 7 }}>
+                    <Check size={13} color={C.accent} strokeWidth={3} />
+                    <span style={{ fontFamily: SANS, fontSize: 12, fontWeight: 700, color: C.accent }}>已更新 About You</span>
+                  </div>
+                  <div style={{ fontFamily: SANS, fontSize: 11.5, fontWeight: 600, color: C.textTertiary, marginBottom: 3 }}>{m.section}</div>
+                  <div style={{ fontFamily: SANS, fontSize: 13, color: C.textPrimary }}>• {m.label}：{m.value}</div>
+                </div>
+              </div>
+            );
+          }
+          return (
+            <div key={i} style={{ display: "flex", justifyContent: m.role === "ai" ? "flex-start" : "flex-end", marginBottom: 10, animation: `fadeSlideUp 0.5s ${SPRING_SOFT}`, animationDelay: `${Math.min(i, 2) * 110}ms`, animationFillMode: "backwards" }}>
+              <div style={{
+                maxWidth: "78%", padding: "10px 14px", borderRadius: 16,
+                borderBottomLeftRadius: m.role === "ai" ? 4 : 16, borderBottomRightRadius: m.role === "user" ? 4 : 16,
+                background: m.role === "ai" ? C.aiBubble : C.userBubble, color: m.role === "ai" ? C.textPrimary : C.userBubbleText,
+                fontFamily: SANS, fontSize: 14.5, lineHeight: 1.5,
+              }}>
+                {m.text}
+              </div>
             </div>
-          </div>
-        ))}
+          );
+        })}
 
         {typing && (
           <div style={{ display: "flex", justifyContent: "flex-start", marginBottom: 10, animation: `fadeSlideUp 0.4s ${SPRING_SOFT}` }}>
@@ -1222,7 +1383,7 @@ function DiscussionScreen({ C, theme, state, setState }) {
         {quickReplies.length > 0 && !typing && (
           <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginTop: 6, marginBottom: 6 }}>
             {quickReplies.map((q) => (
-              <button key={q} onClick={() => advance(q)} style={{
+              <button key={q} onClick={() => advanceScripted(q)} style={{
                 padding: "8px 14px", borderRadius: 999, border: `1.3px solid ${C.accent2}`, background: "transparent",
                 color: C.accent2, fontFamily: SANS, fontSize: 13, fontWeight: 500, cursor: "pointer",
               }}>
