@@ -7,12 +7,13 @@ import {
 } from "lucide-react";
 
 /* ----------------------------------------------------------------------
-   同行｜Alongside — v0.1.1 "Chat Intelligence & Memory Classification"
-   自由對話現在先經過 Memory Classifier 分類（聊天／提供資訊／詢問／修改），
-   再決定要不要回覆、要不要寫入 Memory、要不要更新 About You、要不要先問過
-   使用者。直接陳述的事實會立刻更新並顯示 Memory Update Card；AI 自己的
-   推論仍然維持 v0.1.0 的行為，一定要先詢問。Memory Engine／Confidence／
-   Timeline／Observation／Relationship 資料結構完全未變動。
+   同行｜Alongside — v0.1.2 "Context Engine"
+   Discussion 不再依賴固定 step 腳本。每則自由輸入的訊息都先經過 Context
+   Engine（讀取 My Life／Memory／Journey／Relationship／最近對話／今天進度／
+   多日型態），再決定要提問、建議、安慰、鼓勵、修改 Journey、更新 Memory，
+   或什麼都不做。Journey 修改一律先理解原因才進行，且只調整不刪除。
+   Memory Engine（Classifier／Confidence／Pending Confirmation／Update Card）
+   完全沿用 v0.1.1，未重寫。
 ---------------------------------------------------------------------- */
 
 const STORAGE_KEY = "alongside_state_v1";
@@ -424,6 +425,96 @@ function phraseForCandidate(candidate) {
 }
 
 /* ----------------------------------------------------------------------
+   Context Engine (v0.1.2)
+
+   Discussion no longer runs on a numbered `step`. Instead, every reply is
+   grounded in a snapshot of everything the app actually knows right now:
+   profile (My Life), active Memory, today's Journey (what's done, what's
+   left), Relationship, recent chat, and multi-day patterns (via the same
+   computeInsights/computeStreak already used elsewhere). The only thing
+   that persists between turns is `discussion.thread` — a single, general
+   "what are we currently exploring" slot (not a script position) used
+   for the one case that genuinely needs two turns: understanding *why*
+   before touching Tomorrow's plan.
+---------------------------------------------------------------------- */
+
+function buildContext(state) {
+  const now = new Date();
+  const journey = state.todayJourney;
+  return {
+    now,
+    hour: now.getHours(),
+    journey,
+    completed: journey.filter((i) => i.completedAt),
+    remaining: journey.filter((i) => i.status !== "done"),
+    current: journey.find((i) => i.status === "current") || null,
+    insights: computeInsights(state),
+    streak: computeStreak(state),
+    activeMemories: Object.values(state.memory.entries).filter((m) => m.status === "active"),
+    relationshipSummary: computeRelationshipSummary(state.relationship),
+    recentMessages: state.discussion.messages.slice(-6),
+    profile: state.profile,
+  };
+}
+
+// What the AI opens with — used for a brand new install and for each new
+// day — grounded in real signals when there are any, honest and open
+// when there aren't yet.
+function computeOpener(state) {
+  const ctx = buildContext(state);
+  if (ctx.streak >= 3) return `最近這 ${ctx.streak} 天很穩定，感覺怎麼樣？`;
+  if (ctx.insights.ready && ctx.insights.mostDelayed) return `這幾天「${ctx.insights.mostDelayed}」好像比較常被跳過，最近是不是比較累？`;
+  if (ctx.insights.ready && ctx.insights.avgRate < 40) return "最近的步調感覺有點緊繃，想聊聊嗎？";
+  if (ctx.hour >= 20) return "今天過得怎麼樣？";
+  return "最近過得還好嗎？想聊聊什麼都可以。";
+}
+
+// "今天不想運動" / "不想再滑手機了" — matched against actual Journey item
+// labels (today's or tomorrow's), so this works for whatever the person's
+// real Journey looks like, not a fixed hardcoded item.
+function detectReluctance(text, state) {
+  const m = text.match(/不想(?:再)?([^\s，。！？,.!?]{1,6})/);
+  if (!m) return null;
+  const phrase = m[1];
+  const allItems = [...state.todayJourney, ...state.tomorrowJourney];
+  const match = allItems.find((item) => phrase.includes(item.label) || item.label.includes(phrase));
+  return match ? { itemId: match.id, itemLabel: match.label } : { itemId: null, itemLabel: phrase };
+}
+
+const VALID_REASON_PATTERN = /加班|感冒|生病|不舒服|月經|經期|睡不好|沒睡好|太累|很累/;
+function looksLikeValidReason(text) {
+  return VALID_REASON_PATTERN.test(text);
+}
+function reasonNote(text) {
+  if (/加班/.test(text)) return "昨天加班";
+  if (/感冒|生病|不舒服/.test(text)) return "身體不舒服";
+  if (/月經|經期/.test(text)) return "生理期不舒服";
+  if (/睡不好|沒睡好/.test(text)) return "沒睡好";
+  return "有點累";
+}
+
+function answerQuestion(text, state) {
+  const ctx = buildContext(state);
+  if (/完成.*幾件|做了幾件/.test(text)) return `目前完成了 ${ctx.completed.length} 件事。`;
+  if (/還剩|剩下/.test(text)) {
+    return ctx.remaining.length > 0 ? `還有 ${ctx.remaining.length} 件事，現在是「${ctx.current ? ctx.current.label : ""}」。` : "今天的都完成囉。";
+  }
+  if (/連續|堅持幾天/.test(text)) return `已經連續 ${ctx.streak} 天了。`;
+  return questionReply();
+}
+
+function encouragementReply(state) {
+  const ctx = buildContext(state);
+  if (ctx.streak >= 3) return `這樣的節奏已經維持 ${ctx.streak} 天了，真的不容易。`;
+  if (ctx.completed.length > 0) return "很替你開心，繼續這樣就好。";
+  return "聽起來不錯，我也替你開心。";
+}
+
+function comfortReply() {
+  return "辛苦了。今天發生什麼事？";
+}
+
+/* ----------------------------------------------------------------------
    Relationship — internal only, never rendered to the person. Tracks how
    much they engage with Discussion and how often they accept what the AI
    notices, so future versions can let the AI adapt its own tone/pacing
@@ -463,7 +554,7 @@ function ensureCurrent(items) {
 }
 
 function createInitialState() {
-  return {
+  const base = {
     version: 2,
     theme: "light",
     lastOpenedDate: todayStr(),
@@ -482,14 +573,8 @@ function createInitialState() {
     memory: { entries: {}, timeline: [], pendingConfirmation: null, declinedSignatures: [] },
     relationship: { totalDiscussions: 0, firstInteraction: null, lastInteraction: null, acceptedCount: 0, declinedCount: 0 },
     encryption: { enabled: false },
-    discussion: {
-      messages: [
-        { role: "ai", text: "我發現你這星期有四天，都是下午兩點才吃第一餐。" },
-        { role: "ai", text: "昨天也是，今天也是。要不要一起想想看？" },
-      ],
-      step: 0, showUpdate: false, applied: false,
-    },
   };
+  return { ...base, discussion: { messages: [{ role: "ai", text: computeOpener(base) }], thread: null } };
 }
 
 function migrateToV2(parsed) {
@@ -502,13 +587,25 @@ function migrateToV2(parsed) {
   };
 }
 
+// v0.1.1 and earlier stored a scripted step/showUpdate/applied shape on
+// discussion. v0.1.2 removes that mechanism entirely in favor of `thread`
+// (a general "what are we currently exploring" slot, not a fixed script
+// position) — this just guarantees the new shape exists regardless of
+// what was persisted before, without discarding the message history.
+function normalizeDiscussion(state) {
+  const d = state.discussion || {};
+  const messages = d.messages && d.messages.length ? d.messages : [{ role: "ai", text: computeOpener(state) }];
+  return { ...state, discussion: { messages, thread: d.thread || null } };
+}
+
 function loadState() {
   try {
     const raw = window.localStorage.getItem(STORAGE_KEY);
     if (!raw) return createInitialState();
     const parsed = JSON.parse(raw);
     if (!parsed || (parsed.version !== 1 && parsed.version !== 2)) return createInitialState();
-    return parsed.version === 1 ? migrateToV2(parsed) : parsed;
+    const migrated = parsed.version === 1 ? migrateToV2(parsed) : parsed;
+    return normalizeDiscussion(migrated);
   } catch (e) {
     return createInitialState();
   }
@@ -522,32 +619,23 @@ function saveState(state) {
   }
 }
 
-// When a new day begins, decide what Discussion should say. If the last
-// conversation actually changed something (applied a plan update) and we
-// haven't followed up yet, the AI checks back in — a short, real reason to
-// open Discussion again instead of finding yesterday's finished chat.
-// Otherwise the conversation is left untouched (still worth having).
-function nextDiscussionState(discussion) {
-  if (discussion.applied && !discussion.followedUp) {
-    return {
-      messages: [{ role: "ai", text: "這幾天的晨間流程，感覺怎麼樣？" }],
-      step: "followup0", showUpdate: false, applied: true, followedUp: true,
-    };
-  }
-  return discussion;
-}
-
 function rollToNextDay(state, opts) {
   const { archiveKey, newDate } = opts || {};
   const entries = state.todayJourney.filter((i) => i.completedAt).map((i) => ({ id: i.id, label: i.label, completedAt: i.completedAt }));
   const history = { ...state.history, [archiveKey || state.lastOpenedDate || "unknown"]: { entries } };
   const newToday = state.tomorrowJourney.map((t, i) => ({ ...t, status: i === 0 ? "current" : "upcoming", completedAt: null }));
   const newTomorrow = newToday.map((t) => ({ ...t, status: "upcoming", completedAt: null }));
-  return {
-    ...state, history, todayJourney: newToday, tomorrowJourney: newTomorrow,
-    discussion: nextDiscussionState(state.discussion),
-    lastOpenedDate: newDate || todayStr(),
-  };
+  let next = { ...state, history, todayJourney: newToday, tomorrowJourney: newTomorrow, lastOpenedDate: newDate || todayStr() };
+  // A new day is a natural, real reason to say something — but never
+  // interrupt a conversation thread that's still open, and never wipe
+  // the conversation history, just keep adding to it (capped so it
+  // doesn't grow forever).
+  if (!next.discussion.thread) {
+    const opener = computeOpener(next);
+    const messages = [...next.discussion.messages, { role: "ai", text: opener }].slice(-60);
+    next = { ...next, discussion: { ...next.discussion, messages } };
+  }
+  return next;
 }
 
 /* ----------------------------------------------------------------------
@@ -1127,7 +1215,7 @@ function DiscussionScreen({ C, theme, state, setState }) {
   const [typing, setTyping] = useState(false);
   const openedRef = useRef(false);
 
-  useEffect(() => { if (scrollRef.current) scrollRef.current.scrollTop = scrollRef.current.scrollHeight; }, [d.messages, d.showUpdate, typing, state.memory.pendingConfirmation]);
+  useEffect(() => { if (scrollRef.current) scrollRef.current.scrollTop = scrollRef.current.scrollHeight; }, [d.messages, typing, state.memory.pendingConfirmation]);
 
   // Once per visit: log that a conversation happened, and — if nothing is
   // already waiting for confirmation — quietly check whether a real
@@ -1150,84 +1238,62 @@ function DiscussionScreen({ C, theme, state, setState }) {
     setState((prev) => ({ ...prev, discussion: { ...prev.discussion, ...(typeof patch === "function" ? patch(prev.discussion) : patch) } }));
   }
 
-  const quickReplies = useMemo(() => {
-    if (d.step === 0) return ["最近一直躺著滑手機", "最近比較忙，還沒注意"];
-    if (d.step === 1) return ["可以試試", "再想想"];
-    if (d.step === "followup0") return ["好很多", "普通，再看看"];
-    return [];
-  }, [d.step]);
-
   function pushMessage(role, text) {
     updateDiscussion((prev) => ({ messages: [...prev.messages, { role, text }] }));
   }
 
-  function pushCard(changed) {
-    updateDiscussion((prev) => ({ messages: [...prev.messages, { role: "ai", type: "card", ...changed }] }));
+  function pushCard(payload) {
+    updateDiscussion((prev) => ({ messages: [...prev.messages, { role: "ai", type: "card", ...payload }] }));
   }
 
-  // Quick-reply chips still drive the existing guided demo exactly as
-  // before — untouched from v0.1.0/v0.0.4, since that's an existing
-  // feature the classifier shouldn't interfere with.
-  function advanceScripted(userText) {
-    pushMessage("user", userText);
+  function setThread(thread) {
+    setState((prev) => ({ ...prev, discussion: { ...prev.discussion, thread } }));
+  }
 
-    if (d.step === 0) {
-      if (userText === "最近一直躺著滑手機") {
-        setTyping(true);
-        setTimeout(() => {
-          setTyping(false);
-          pushMessage("ai", "這樣啊。如果不勉強自己戒手機，換個地方滑呢？像是去電腦房。");
-          updateDiscussion({ step: 1 });
-        }, 900);
+  // Resolves an open "explore_reluctance" thread once the person has
+  // explained (or not) why. Shared by both the immediate one-turn case
+  // (reason given right away) and the two-turn case (asked, then answered).
+  function resolveReluctance(info, reasonText) {
+    if (looksLikeValidReason(reasonText)) {
+      const note = reasonNote(reasonText);
+      if (info.itemId) {
+        setState((prev) => ({
+          ...prev,
+          tomorrowJourney: prev.tomorrowJourney.map((it) =>
+            it.id === info.itemId
+              ? { ...it, sub: `${note}，先休息，不用勉強。`, reason: `提到${note}，這件事今天不用勉強自己，量力而為就好。` }
+              : it
+          ),
+          discussion: { ...prev.discussion, thread: null },
+        }));
+        pushMessage("ai", `辛苦了，那今天就先別勉強自己。我把明天的「${info.itemLabel}」也先調整成不用勉強。`);
+        pushCard({ cardKind: "journey", section: "明天的計畫", label: info.itemLabel, value: "先休息，不用勉強" });
       } else {
-        setTyping(true);
-        setTimeout(() => {
-          setTyping(false);
-          pushMessage("ai", "了解，那我們先不特別調整，只是想讓你知道，我有在留意這件事。");
-          updateDiscussion({ step: 3 });
-        }, 900);
+        setThread(null);
+        pushMessage("ai", "辛苦了，那今天就先照顧好自己，其他的都可以再說。");
       }
-    } else if (d.step === 1) {
-      if (userText === "可以試試") {
-        setTyping(true);
-        setTimeout(() => {
-          setTyping(false);
-          pushMessage("ai", "好，那我把這個加進明天的計畫。");
-          updateDiscussion({ step: 2 });
-          setTimeout(() => updateDiscussion({ showUpdate: true }), 550);
-        }, 900);
-      } else {
-        setTyping(true);
-        setTimeout(() => {
-          setTyping(false);
-          pushMessage("ai", "沒關係，不用勉強，你想到再跟我說。");
-          updateDiscussion({ step: 3 });
-        }, 900);
-      }
-    } else if (d.step === "followup0") {
-      setTyping(true);
-      setTimeout(() => {
-        setTyping(false);
-        pushMessage("ai", userText === "好很多" ? "太好了，那就先維持這樣。" : "沒關係，我們可以再一起調整看看。");
-        updateDiscussion({ step: "followupEnd" });
-      }, 900);
     } else {
-      setTyping(true);
-      setTimeout(() => {
-        setTyping(false);
-        pushMessage("ai", "好，我先記下來，之後我們可以再聊。");
-      }, 900);
+      setThread(null);
+      pushMessage("ai", "了解，那今天就先不勉強自己，休息也是需要的。");
     }
   }
 
-  // Typed free text goes through the Memory Classifier: figure out what
-  // kind of message this is, then decide whether to reply, update
-  // Memory, update About You, or ask for confirmation — not the same
-  // flow for every message.
-  function advanceFreeText(userText) {
+  // Every typed message is grounded in context, not a script position.
+  // Order: resolve an open thread first, then Memory Engine facts
+  // (unchanged from v0.1.1), then reluctance/complaint/question/
+  // encouragement/chitchat — most of these end the turn without
+  // touching any data at all.
+  function respond(userText) {
     pushMessage("user", userText);
-    const classification = classifyMessage(userText, state);
+    const thread = d.thread;
 
+    if (thread && thread.kind === "explore_reluctance") {
+      setTyping(true);
+      setTimeout(() => { setTyping(false); resolveReluctance(thread, userText); }, 900);
+      return;
+    }
+
+    const classification = classifyMessage(userText, state);
     if (classification.intent === "info" || classification.intent === "modify") {
       const { statement } = classification;
       let changed = null;
@@ -1240,14 +1306,43 @@ function DiscussionScreen({ C, theme, state, setState }) {
       setTimeout(() => {
         setTyping(false);
         pushMessage("ai", classification.intent === "modify" ? "好，幫你更新一下。" : "好，我記下來了。");
-        if (changed) pushCard(changed);
+        if (changed) pushCard({ cardKind: "profile", ...changed });
       }, 900);
       return;
     }
 
-    if (classification.intent === "question") {
+    const reluctance = detectReluctance(userText, state);
+    if (reluctance) {
+      const immediateReason = looksLikeValidReason(userText);
       setTyping(true);
-      setTimeout(() => { setTyping(false); pushMessage("ai", questionReply()); }, 900);
+      setTimeout(() => {
+        setTyping(false);
+        if (immediateReason) {
+          resolveReluctance(reluctance, userText);
+        } else {
+          pushMessage("ai", "怎麼了嗎？是發生什麼事，還是單純不想動？");
+          setThread({ kind: "explore_reluctance", ...reluctance });
+        }
+      }, 900);
+      return;
+    }
+
+    if (/累|辛苦|壓力|煩|難過|不舒服|不開心/.test(userText)) {
+      setTyping(true);
+      setTimeout(() => { setTyping(false); pushMessage("ai", comfortReply()); }, 900);
+      return;
+    }
+
+    const trimmed = userText.trim();
+    if (/[?？]$/.test(trimmed) || /^(為什麼|怎麼|要不要|可以嗎|該不該|是不是)/.test(trimmed)) {
+      setTyping(true);
+      setTimeout(() => { setTyping(false); pushMessage("ai", answerQuestion(userText, state)); }, 900);
+      return;
+    }
+
+    if (/完成|做到|順利|不錯|開心|太好了/.test(userText)) {
+      setTyping(true);
+      setTimeout(() => { setTyping(false); pushMessage("ai", encouragementReply(state)); }, 900);
       return;
     }
 
@@ -1260,26 +1355,7 @@ function DiscussionScreen({ C, theme, state, setState }) {
     const text = input.trim();
     if (!text) return;
     setInput("");
-    advanceFreeText(text);
-  }
-
-  function handleApply() {
-    if (d.applied) return;
-    setState((prev) => {
-      let tomorrow = prev.tomorrowJourney;
-      if (!tomorrow.some((s) => s.id === "scrollroom")) {
-        const i = tomorrow.findIndex((s) => s.id === "milktea");
-        const newItem = {
-          id: "scrollroom", label: "電腦房滑手機", iconKey: "Smartphone", emoji: "📱", phase: "morning",
-          sub: "換個地方，感覺會不太一樣。", reason: "還躺在床上很容易越滑越久，換個地方，起床會自然一點。",
-          status: "upcoming", completedAt: null,
-        };
-        tomorrow = [...tomorrow];
-        tomorrow.splice(i === -1 ? tomorrow.length : i + 1, 0, newItem);
-      }
-      const newGoals = Array.from(new Set([...prev.goals, "減少空腹時間", "縮短賴床時間"]));
-      return { ...prev, tomorrowJourney: tomorrow, goals: newGoals, discussion: { ...prev.discussion, applied: true } };
-    });
+    respond(text);
   }
 
   function handleAcceptMemory() {
@@ -1321,12 +1397,15 @@ function DiscussionScreen({ C, theme, state, setState }) {
       <div ref={scrollRef} style={{ flex: 1, overflowY: "auto", padding: "14px 20px" }}>
         {d.messages.map((m, i) => {
           if (m.type === "card") {
+            const isJourney = m.cardKind === "journey";
             return (
               <div key={i} style={{ display: "flex", justifyContent: "flex-start", marginBottom: 10, animation: `fadeSlideUp 0.5s ${SPRING_SOFT}` }}>
                 <div style={{ maxWidth: "82%", background: C.accentSoft, borderRadius: 14, padding: "12px 15px" }}>
                   <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 7 }}>
                     <Check size={13} color={C.accent} strokeWidth={3} />
-                    <span style={{ fontFamily: SANS, fontSize: 12, fontWeight: 700, color: C.accent }}>已更新 About You</span>
+                    <span style={{ fontFamily: SANS, fontSize: 12, fontWeight: 700, color: C.accent }}>
+                      {isJourney ? "已調整明天的計畫" : "已更新 About You"}
+                    </span>
                   </div>
                   <div style={{ fontFamily: SANS, fontSize: 11.5, fontWeight: 600, color: C.textTertiary, marginBottom: 3 }}>{m.section}</div>
                   <div style={{ fontFamily: SANS, fontSize: 13, color: C.textPrimary }}>• {m.label}：{m.value}</div>
@@ -1379,51 +1458,6 @@ function DiscussionScreen({ C, theme, state, setState }) {
             </div>
           </div>
         )}
-
-        {quickReplies.length > 0 && !typing && (
-          <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginTop: 6, marginBottom: 6 }}>
-            {quickReplies.map((q) => (
-              <button key={q} onClick={() => advanceScripted(q)} style={{
-                padding: "8px 14px", borderRadius: 999, border: `1.3px solid ${C.accent2}`, background: "transparent",
-                color: C.accent2, fontFamily: SANS, fontSize: 13, fontWeight: 500, cursor: "pointer",
-              }}>
-                {q}
-              </button>
-            ))}
-          </div>
-        )}
-
-        {d.showUpdate && (
-          <div style={{ marginTop: 14, background: C.surface, border: `1px solid ${C.border}`, borderRadius: 16, padding: 18, animation: `bobIn 0.6s ${SPRING}` }}>
-            <div style={{ display: "flex", alignItems: "center", gap: 7, marginBottom: 14 }}>
-              <Sparkles size={15} color={C.accent} />
-              <span style={{ fontFamily: SANS, fontSize: 13, fontWeight: 700, color: C.textPrimary }}>本次更新</span>
-            </div>
-            <div style={{ fontFamily: SANS, fontSize: 12, fontWeight: 600, color: C.textTertiary, marginBottom: 8, letterSpacing: 0.4 }}>新增（明天生效）</div>
-            {["起床後泡奶茶", "去電腦房滑手機"].map((t) => (
-              <div key={t} style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 7 }}>
-                <div style={{ width: 18, height: 18, borderRadius: "50%", background: C.accentSoft, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
-                  <Check size={11} color={C.accent} strokeWidth={3} />
-                </div>
-                <span style={{ fontFamily: SANS, fontSize: 13.5, color: C.textPrimary }}>{t}</span>
-              </div>
-            ))}
-            <div style={{ fontFamily: SANS, fontSize: 12, fontWeight: 600, color: C.textTertiary, margin: "14px 0 8px", letterSpacing: 0.4 }}>目標</div>
-            <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 6 }}>
-              {["減少空腹時間", "縮短賴床時間"].map((g) => (
-                <span key={g} style={{ fontFamily: SANS, fontSize: 12, color: C.accent2, background: C.accent2Soft, padding: "5px 11px", borderRadius: 999, fontWeight: 500 }}>{g}</span>
-              ))}
-            </div>
-            <div style={{ fontFamily: SANS, fontSize: 11.5, color: C.textTertiary, marginBottom: 16 }}>會在明天開始時生效，不影響今天。</div>
-            <button onClick={handleApply} disabled={d.applied} style={{
-              width: "100%", padding: "11px 0", borderRadius: 999, border: "none",
-              background: d.applied ? C.accentSoft : C.accent, color: d.applied ? C.accent : "#fff",
-              fontFamily: SANS, fontSize: 14, fontWeight: 600, cursor: d.applied ? "default" : "pointer", transition: "all 0.2s ease",
-            }}>
-              {d.applied ? "已加入明天的計畫 ✓" : "套用到明天的計畫"}
-            </button>
-          </div>
-        )}
       </div>
 
       <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "10px 16px", borderTop: `1px solid ${C.border}`, background: C.phoneBg }}>
@@ -1439,7 +1473,6 @@ function DiscussionScreen({ C, theme, state, setState }) {
     </div>
   );
 }
-
 /* ----------------------------------------------------------------------
    Insights — derived purely from existing history + today data.
    No new data is stored; these are just computed at render time.

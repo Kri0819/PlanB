@@ -1,71 +1,84 @@
-# v0.1.1 — Chat Intelligence & Memory Classification
+# v0.1.2 — Context Engine
 
-提升 Discussion 對自由對話的理解能力。這次沒有動 Memory Engine、
-Confidence、Timeline、Observation、Relationship 的資料結構——只重構「訊息
-進來之後，AI 怎麼決定要做什麼」這條流程。舊版本檔案（v0.1.0 及之前）都
-沒有被覆蓋，全部保留在各自的版本檔名底下。
+Discussion 不再是一段腳本，而是每次都根據當下情境回應的對話。這次沒有動
+Memory Engine 的資料結構（Classifier／Confidence／Pending Confirmation／
+Update Card 全部沿用 v0.1.1），只重構「AI 怎麼決定下一句話」這件事。
+舊版本檔案都保留，沒有覆蓋。
 
-## 一、Memory Classifier
-新增 `classifyMessage(text, state)`，每一則「自由輸入」的訊息（不是預設
-的快速回覆按鈕）送出後，會先分類成四種意圖之一，再決定要怎麼處理：
+## 一、移除所有 step 流程
+`discussion.step` / `showUpdate` / `applied` / `followedUp` 全部拿掉，
+`switch(step)` 式的固定劇本（milktea → 電腦房 → 套用明天計畫）完全刪除。
+取代它的是 `discussion.thread`：一個單一、通用的「現在正在了解什麼」欄位，
+不是腳本位置編號，只有一種情況會用到它——需要先問過原因才能調整 Journey。
 
-| 意圖 | 判斷方式 | 處理 |
-|---|---|---|
-| `modify` | 出現「其實／後來／改成」等修正語氣，且新值與現有資料不同 | 直接更新 + 顯示卡片 |
-| `info` | 符合任一直接事實規則 | 直接更新 + 顯示卡片 |
-| `question` | 以「？」結尾或「為什麼／怎麼／要不要」開頭 | 只回覆，不更新 |
-| `chitchat` | 以上皆非 | 只回覆，不更新 |
+舊資料如果還留著 `step`/`showUpdate` 等欄位不會出錯，新程式碼完全不會讀
+它們；`normalizeDiscussion()` 會確保載入時一定有 `messages`／`thread`
+這兩個欄位。
 
-重要：快速回覆按鈕（milktea／電腦房那組導引式對話）完全走原本的腳本
-（`advanceScripted`），分類器只作用在使用者自己打字的內容
-（`advanceFreeText`），兩者互不干擾。
+## 二、Context Engine
+新增 `buildContext(state)`，組出完整情境快照：
 
-## 二、擴充 My Life 自動分類規則
-`detectDirectStatement()` 從原本 3 條規則擴充到涵蓋你列的完整對照表：
+- My Life（`profile`）
+- Memory（`activeMemories`，只取目前有效的）
+- Journey（今天完成了什麼、還剩什麼、現在進行到哪一項）
+- Relationship（`computeRelationshipSummary`）
+- 最近幾則對話（`recentMessages`）
+- 現在時間、最近幾天的型態（沿用既有的 `computeInsights`／`computeStreak`）
 
-- 姓名／暱稱 → 個人資訊
-- 生日 → 個人資訊
-- 睡眠時間 → 生活偏好（睡眠偏好）
-- 工作型態／加班／很忙／在職產業 → 工作型態
-- 不喜歡吃 X → 生活偏好（不喜歡的食物）
-- 每天喝／吃 X（習慣） → 生活偏好（飲食偏好）
-- 固定吃魚油／維他命／B群等 → 生活偏好（保健食品）
-- 固定服藥 → 生活偏好（固定藥物）
-- 正在減肥／瘦身／戒⋯ → 記錄為 Memory（最近狀態），沒有對應欄位可寫就不
-  勉強塞一個，只留在 Memory 裡
+`computeOpener()`／`answerQuestion()`／`encouragementReply()` 都是從這份
+情境算出來的，不是固定文案輪播。
 
-新增 `PROFILE_FIELD_META`，讓每個欄位知道自己屬於 About You 的哪個分區
-（個人資訊／工作型態／生活偏好），這是 Memory Update Card 顯示位置的依據。
+## 三、意圖判斷更豐富，但不是每種都要「處理」
+每則自由輸入的訊息依序判斷：
 
-## 三、直接事實立即更新，不再每次都問
-`info` 與 `modify` 兩種意圖都會立刻寫入（`applyDirectStatement`），完全
-不會跳出「要不要記住？」。回覆也改成自然的一句話（「好，我記下來了。」／
-修正時是「好，幫你更新一下。」），不會機械式重複同一句話。
+1. 有沒有正在進行中的 `thread`（先把上一輪的問題問完）
+2. 是不是在陳述／修正自己的資訊（沿用 v0.1.1 的 Memory Classifier，優先權
+   最高，行為完全沒變）
+3. 是不是對某件 Journey 上的事表達不想做（`detectReluctance`，會去比對
+   今天／明天 Journey 裡實際存在的項目名稱，不是寫死的「運動」兩個字）
+4. 是不是在抱怨／需要安慰
+5. 是不是在問問題（會盡量用真實資料回答，例如「今天完成了幾件事」會直接
+   算給你看，而不是隨便回一句）
+6. 是不是分享了好消息，需要鼓勵
+7. 都不是的話，就是單純聊天——只回覆，不做任何更新
 
-## 四、推測型內容維持原本的確認機制
-AI 自己從行為模式推論出來的東西（`detectInferredCandidate`，例如從
-Journey 完成紀錄看出高頻率的奶茶／咖啡／散步）完全沒有改動，一樣只會先
-跳出 💡 確認卡片，使用者按「記住」才會真的存。這次刻意沒有讓分類器去做
-「從聊天內容猜測」這件事——用力猜測使用者話裡沒直接講的事，风险比效益大，
-維持只從真實行為模式做推論這個原則。
+大部分分支最後都只是「回一句話」，沒有更新任何資料。
 
-## 五、新增 Memory Update Card
-只要一則訊息成功更新了 About You 的某個欄位，聊天室就會多一張卡片：
+## 四、Journey 修改一定先理解原因，而且只調整不刪除
+使用者說「今天真的不想運動」：
 
-```
-✓ 已更新 About You
-生活偏好
-• 不喜歡的食物：不喜歡香菜
-```
+- 如果同一句話已經帶了理由（「今天感冒不想運動」），AI 一次就回應＋調整
+- 如果沒有理由，AI 會先問「怎麼了嗎？」，記在 `thread` 裡，等下一句回覆
+  才判斷：理由成立（加班／感冒／不舒服／月經／沒睡好／太累）就調整明天
+  該項目的 `sub`／`reason` 文字（例如「先休息，不用勉強」），並用卡片告知
+  調整了什麼；理由不成立或沒有具體理由，就只有情感上的接住，完全不碰
+  Journey 資料
 
-不再只有一句「好，我記住了」——卡片會準確告訴使用者「更新了哪一區、哪個
-欄位、變成什麼值」。`discussion.messages` 的訊息物件多了一個可選的
-`type: "card"` 欄位（連同 `section`/`label`/`value`）；沒有這個欄位的舊
-訊息一樣以純文字泡泡呈現，完全向下相容。
+不會出現直接刪除 Journey 項目的情況。
 
-## 六、沒有動到的部分
-Memory Engine（`memory.entries` 形狀）、Confidence／衰退邏輯
-（`getEffectiveConfidence`／`runMemoryDecay`）、Timeline
-（`memory.timeline`）、Observation↔Memory（`pendingConfirmation` 機制）、
-Relationship（`relationship` 物件與 `computeRelationshipSummary`）全部
-維持 v0.1.0 的資料結構與行為，一個欄位都沒有改。
+## 五、單純聊天不會被硬套流程
+「今天很累」這種話，AI 只會回「辛苦了，今天發生什麼事？」，不會因為聊天
+就跑去修改 Journey 或跳出確認卡片——這是刻意的，不是還沒做完。
+
+## 六、Memory Update Card 現在分兩種
+沿用 v0.1.1 的卡片外觀，但依內容顯示不同標題：
+
+- 資訊類更新 → 「✓ 已更新 About You」
+- Journey 調整 → 「✓ 已調整明天的計畫」
+
+## 七、對話不再每天重置
+之前（v0.0.5／v0.1.x）每天開始會「換一組新訊息」，其實等於每天洗掉聊天
+紀錄。這次改成：新的一天只是在既有對話後面「多說一句」（`computeOpener`
+算出的新開場白），除非還有沒問完的 `thread`（那種情況不打斷），訊息歷史
+會保留（上限 60 則，避免無限成長），比較符合「持續一段關係」的感覺。
+
+## 八、語氣
+拿掉「我了解了」「我已更新」這類制式客服語。更新事實時的回覆改成「好，
+我記下來了。」／修正時是「好，幫你更新一下。」；問題／鼓勵／安慰各自有
+對應語氣，卡片本身負責把「到底更新了什麼」講清楚，回覆的文字不需要再
+機械式重複一次。
+
+## 沒有動到的部分
+`memory.entries`／`getEffectiveConfidence`／`runMemoryDecay`／
+`memory.timeline`／`memory.pendingConfirmation`／`relationship` 資料結構
+與行為，全部與 v0.1.1 相同，一個欄位都沒有改。
