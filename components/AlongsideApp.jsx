@@ -7,9 +7,10 @@ import {
 } from "lucide-react";
 
 /* ----------------------------------------------------------------------
-   同行｜Alongside — v0.0.3 "Living Data"
-   資料開始被記錄：Local Storage 持久化、可編輯／可拖曳排序的 Journey、
-   Discussion 真正修改 Tomorrow Journey 與 Goals、My Life 可編輯。
+   同行｜Alongside — v0.1.0 "Memory"
+   AI 開始真正認識使用者：Memory Engine（含信心值、衰退、Observation↔Memory、
+   Timeline）、Discussion 直接／經同意寫入 Memory 並自動更新 About You、
+   Relationship（內部使用）、以及為未來加密分層預留的資料結構。
 ---------------------------------------------------------------------- */
 
 const STORAGE_KEY = "alongside_state_v1";
@@ -136,6 +137,209 @@ function genId() {
   return `item-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
 }
 
+/* ----------------------------------------------------------------------
+   Memory Engine (v0.1.0)
+
+   This is the AI's curated knowledge about the person — distinct from the
+   raw Discussion transcript. Every entry carries content, confidence,
+   when it was last confirmed, where it came from, and whether it's still
+   considered valid. Everything here lives inside the same localStorage
+   blob as the rest of the app (see STORAGE_KEY) — there is no separate
+   store. The "layers" below are a logical grouping of the state object's
+   own top-level keys, kept deliberately explicit so that if/when real
+   end-to-end encryption is added, each layer can be encrypted
+   independently without another data-model rewrite:
+
+     chatLayer     -> discussion            (raw conversation)
+     memoryLayer   -> memory, relationship  (curated knowledge about the person)
+     lifeLayer     -> todayJourney, tomorrowJourney, goals, history
+     profileLayer  -> profile, aiPersonality, notifications, healthSync, theme
+
+   `encryption.enabled` is a reserved flag; encryption itself is not
+   implemented yet, by design, until this shape has proven itself.
+---------------------------------------------------------------------- */
+
+const MEMORY_CATEGORIES = {
+  habit: { label: "生活習慣", decays: true, decayRatePerDay: 1.1 },
+  work: { label: "工作型態", decays: true, decayRatePerDay: 0.9 },
+  preference: { label: "偏好", decays: false, decayRatePerDay: 0 },
+  dislike: { label: "不喜歡", decays: false, decayRatePerDay: 0 },
+  recent_state: { label: "最近狀態", decays: true, decayRatePerDay: 2.5 },
+  long_term_change: { label: "長期變化", decays: true, decayRatePerDay: 0.6 },
+};
+
+const MEMORY_ARCHIVE_THRESHOLD = 15; // effective confidence below this -> quietly archived
+const TIMELINE_ACTION_LABEL = { add: "新增", update: "更新", remove: "移除", archive: "封存" };
+
+function genMemId() {
+  return `mem-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+}
+
+// The confidence a memory shows *right now*, factoring in decay since it
+// was last confirmed. Nothing is mutated here — this is read-time only,
+// so it's always safe to call from a render.
+function getEffectiveConfidence(mem, now) {
+  const meta = MEMORY_CATEGORIES[mem.category];
+  if (!meta || !meta.decays || mem.status !== "active") return mem.confidence;
+  const days = (now - new Date(mem.lastUpdate)) / 86400000;
+  return Math.max(0, Math.round(mem.confidence - days * meta.decayRatePerDay));
+}
+
+function addTimelineEntry(memory, action, label) {
+  const entry = { id: genMemId(), date: todayStr(), action, label };
+  return [entry, ...memory.timeline].slice(0, 40);
+}
+
+// Add or refresh a memory. If an active memory with the same category +
+// content already exists, this reinforces it (confidence takes the max,
+// lastUpdate resets) rather than creating a duplicate.
+function upsertMemory(state, { category, content, confidence, source }) {
+  const now = new Date().toISOString();
+  const existing = Object.values(state.memory.entries).find(
+    (m) => m.category === category && m.content === content && m.status !== "archived"
+  );
+  const entries = { ...state.memory.entries };
+  let action = "update";
+  let id;
+  if (existing) {
+    id = existing.id;
+    entries[id] = { ...existing, confidence: Math.max(existing.confidence, confidence), lastUpdate: now, status: "active", source };
+  } else {
+    id = genMemId();
+    entries[id] = { id, category, content, confidence, lastUpdate: now, source, status: "active", createdAt: now };
+    action = "add";
+  }
+  const timeline = addTimelineEntry(state.memory, action, content);
+  return { ...state, memory: { ...state.memory, entries, timeline } };
+}
+
+function forgetMemory(state, id) {
+  const mem = state.memory.entries[id];
+  if (!mem) return state;
+  const entries = { ...state.memory.entries, [id]: { ...mem, status: "archived" } };
+  const timeline = addTimelineEntry(state.memory, "remove", mem.content);
+  return { ...state, memory: { ...state.memory, entries, timeline } };
+}
+
+// Run once per app load: anything whose effective confidence has quietly
+// decayed past the threshold gets archived (with a timeline record), so
+// stale "facts" don't linger forever just because no one revisited them.
+function runMemoryDecay(state) {
+  const now = new Date();
+  let entries = state.memory.entries;
+  let timeline = state.memory.timeline;
+  let changed = false;
+  Object.values(entries).forEach((mem) => {
+    if (mem.status !== "active") return;
+    const meta = MEMORY_CATEGORIES[mem.category];
+    if (!meta || !meta.decays) return;
+    if (getEffectiveConfidence(mem, now) <= MEMORY_ARCHIVE_THRESHOLD) {
+      entries = { ...entries, [mem.id]: { ...mem, status: "archived" } };
+      timeline = [{ id: genMemId(), date: todayStr(), action: "archive", label: mem.content }, ...timeline].slice(0, 40);
+      changed = true;
+    }
+  });
+  return changed ? { ...state, memory: { ...state.memory, entries, timeline } } : state;
+}
+
+// Things the person states directly about themselves in Discussion get
+// remembered right away — no need to ask, they said it outright.
+function detectDirectStatement(text) {
+  const sleepMatch = text.match(/(\d{1,2})[:：]?(\d{2})?\s*點半?\s*睡/);
+  if (sleepMatch && /每天|通常|習慣|都/.test(text)) {
+    const hh = sleepMatch[1].padStart(2, "0");
+    const mm = sleepMatch[2] || (text.includes("半") ? "30" : "00");
+    return { category: "habit", content: `習慣 ${hh}:${mm} 睡覺`, confidence: 90, field: "sleep", value: `${hh}:${mm}` };
+  }
+  if (/加班/.test(text)) {
+    return { category: "work", content: "最近常常加班", confidence: 85, field: "workType", value: "最近常常加班" };
+  }
+  if (/很忙|忙翻|忙死|忙不過來/.test(text)) {
+    return { category: "work", content: "最近工作比較忙碌", confidence: 82, field: "workType", value: "最近比較忙碌" };
+  }
+  const dislikeMatch = text.match(/(?:討厭|不喜歡|不吃)([^\s，。！？,.!?]{1,6})/);
+  if (dislikeMatch) {
+    const item = dislikeMatch[1];
+    return { category: "dislike", content: `不喜歡${item}`, confidence: 88, field: "dislikedFoods", value: item, appendField: true };
+  }
+  return null;
+}
+
+function applyDirectStatement(state, statement) {
+  let next = upsertMemory(state, { category: statement.category, content: statement.content, confidence: statement.confidence, source: "discussion" });
+  if (statement.field) {
+    const profile = { ...next.profile };
+    if (statement.appendField) {
+      const existingVal = profile[statement.field] || "";
+      if (!existingVal.includes(statement.value)) {
+        profile[statement.field] = existingVal ? `${existingVal}、${statement.value}` : statement.value;
+      }
+    } else {
+      profile[statement.field] = statement.value;
+    }
+    next = { ...next, profile };
+  }
+  return next;
+}
+
+// Patterns the AI notices on its own (from what's actually been completed
+// over time) are treated as inferences, not facts — these must be
+// confirmed before becoming a Memory. Deliberately conservative: needs a
+// real run of history and a strong, consistent signal.
+function detectInferredCandidate(state) {
+  const historyEntries = Object.values(state.history).map((d) => d.entries || []);
+  if (historyEntries.length < 3) return null;
+  const freq = {};
+  historyEntries.forEach((entries) => entries.forEach((e) => { freq[e.label] = (freq[e.label] || 0) + 1; }));
+  const totalDays = historyEntries.length;
+  const watchWords = ["奶茶", "咖啡", "散步"];
+  const [label] = Object.entries(freq)
+    .filter(([l, count]) => count / totalDays >= 0.8 && watchWords.some((w) => l.includes(w)))
+    .sort((a, b) => b[1] - a[1])[0] || [];
+  if (!label) return null;
+  const content = `喜歡${label}`;
+  const already = Object.values(state.memory.entries).some((m) => m.content === content && m.status !== "archived");
+  const declined = (state.memory.declinedSignatures || []).includes(content);
+  if (already || declined) return null;
+  return { category: "preference", content, confidence: 70, source: "journey_pattern" };
+}
+
+function phraseForCandidate(candidate) {
+  if (candidate.category === "preference") return `你好像很${candidate.content}。`;
+  return `${candidate.content}。`;
+}
+
+/* ----------------------------------------------------------------------
+   Relationship — internal only, never rendered to the person. Tracks how
+   much they engage with Discussion and how often they accept what the AI
+   notices, so future versions can let the AI adapt its own tone/pacing
+   without needing a settings toggle for it.
+---------------------------------------------------------------------- */
+
+function bumpRelationshipOpened(state) {
+  const r = state.relationship;
+  return {
+    ...state,
+    relationship: {
+      ...r,
+      totalDiscussions: r.totalDiscussions + 1,
+      firstInteraction: r.firstInteraction || new Date().toISOString(),
+      lastInteraction: new Date().toISOString(),
+    },
+  };
+}
+
+function computeRelationshipSummary(relationship) {
+  const days = relationship.firstInteraction
+    ? Math.max(1, Math.round((Date.now() - new Date(relationship.firstInteraction)) / 86400000))
+    : 1;
+  const chatFrequency = Math.round((relationship.totalDiscussions / days) * 100) / 100;
+  const totalResponses = relationship.acceptedCount + relationship.declinedCount;
+  const acceptRate = totalResponses > 0 ? Math.round((relationship.acceptedCount / totalResponses) * 100) : null;
+  const trust = Math.min(100, Math.round(relationship.totalDiscussions * 3 + (acceptRate || 50) * 0.5));
+  return { chatFrequency, acceptRate, trust };
+}
+
 function ensureCurrent(items) {
   if (items.length === 0) return items;
   if (items.some((i) => i.status === "current")) return items;
@@ -146,7 +350,7 @@ function ensureCurrent(items) {
 
 function createInitialState() {
   return {
-    version: 1,
+    version: 2,
     theme: "light",
     lastOpenedDate: todayStr(),
     profile: {
@@ -161,6 +365,9 @@ function createInitialState() {
     todayJourney: JOURNEY_TEMPLATE.map((t, i) => ({ ...t, status: i === 0 ? "current" : "upcoming", completedAt: null })),
     tomorrowJourney: JOURNEY_TEMPLATE.map((t) => ({ ...t, status: "upcoming", completedAt: null })),
     history: {},
+    memory: { entries: {}, timeline: [], pendingConfirmation: null, declinedSignatures: [] },
+    relationship: { totalDiscussions: 0, firstInteraction: null, lastInteraction: null, acceptedCount: 0, declinedCount: 0 },
+    encryption: { enabled: false },
     discussion: {
       messages: [
         { role: "ai", text: "我發現你這星期有四天，都是下午兩點才吃第一餐。" },
@@ -171,13 +378,23 @@ function createInitialState() {
   };
 }
 
+function migrateToV2(parsed) {
+  return {
+    ...parsed,
+    version: 2,
+    memory: parsed.memory || { entries: {}, timeline: [], pendingConfirmation: null, declinedSignatures: [] },
+    relationship: parsed.relationship || { totalDiscussions: 0, firstInteraction: null, lastInteraction: null, acceptedCount: 0, declinedCount: 0 },
+    encryption: parsed.encryption || { enabled: false },
+  };
+}
+
 function loadState() {
   try {
     const raw = window.localStorage.getItem(STORAGE_KEY);
     if (!raw) return createInitialState();
     const parsed = JSON.parse(raw);
-    if (!parsed || parsed.version !== 1) return createInitialState();
-    return parsed;
+    if (!parsed || (parsed.version !== 1 && parsed.version !== 2)) return createInitialState();
+    return parsed.version === 1 ? migrateToV2(parsed) : parsed;
   } catch (e) {
     return createInitialState();
   }
@@ -794,8 +1011,26 @@ function DiscussionScreen({ C, theme, state, setState }) {
   const scrollRef = useRef(null);
   const [input, setInput] = useState("");
   const [typing, setTyping] = useState(false);
+  const openedRef = useRef(false);
 
-  useEffect(() => { if (scrollRef.current) scrollRef.current.scrollTop = scrollRef.current.scrollHeight; }, [d.messages, d.showUpdate, typing]);
+  useEffect(() => { if (scrollRef.current) scrollRef.current.scrollTop = scrollRef.current.scrollHeight; }, [d.messages, d.showUpdate, typing, state.memory.pendingConfirmation]);
+
+  // Once per visit: log that a conversation happened, and — if nothing is
+  // already waiting for confirmation — quietly check whether a real
+  // behavioral pattern has emerged worth asking about.
+  useEffect(() => {
+    if (openedRef.current) return;
+    openedRef.current = true;
+    setState((prev) => {
+      let next = bumpRelationshipOpened(prev);
+      if (!next.memory.pendingConfirmation) {
+        const candidate = detectInferredCandidate(next);
+        if (candidate) next = { ...next, memory: { ...next.memory, pendingConfirmation: candidate } };
+      }
+      return next;
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   function updateDiscussion(patch) {
     setState((prev) => ({ ...prev, discussion: { ...prev.discussion, ...(typeof patch === "function" ? patch(prev.discussion) : patch) } }));
@@ -814,6 +1049,18 @@ function DiscussionScreen({ C, theme, state, setState }) {
 
   function advance(userText) {
     pushMessage("user", userText);
+
+    const statement = detectDirectStatement(userText);
+    if (statement) {
+      setState((prev) => applyDirectStatement(prev, statement));
+      setTyping(true);
+      setTimeout(() => {
+        setTyping(false);
+        pushMessage("ai", `好，我記下來了：${statement.content}`);
+      }, 900);
+      return;
+    }
+
     if (d.step === 0) {
       if (userText === "最近一直躺著滑手機") {
         setTyping(true);
@@ -890,6 +1137,35 @@ function DiscussionScreen({ C, theme, state, setState }) {
     });
   }
 
+  function handleAcceptMemory() {
+    const c = state.memory.pendingConfirmation;
+    if (!c) return;
+    setState((prev) => {
+      let next = upsertMemory(prev, { category: c.category, content: c.content, confidence: c.confidence, source: c.source });
+      next = {
+        ...next,
+        memory: { ...next.memory, pendingConfirmation: null },
+        relationship: { ...next.relationship, acceptedCount: next.relationship.acceptedCount + 1, lastInteraction: new Date().toISOString() },
+      };
+      return next;
+    });
+    pushMessage("ai", "好，我記住了。");
+  }
+
+  function handleDeclineMemory() {
+    const c = state.memory.pendingConfirmation;
+    if (!c) return;
+    setState((prev) => ({
+      ...prev,
+      memory: {
+        ...prev.memory, pendingConfirmation: null,
+        declinedSignatures: [...(prev.memory.declinedSignatures || []), c.content].slice(-30),
+      },
+      relationship: { ...prev.relationship, declinedCount: prev.relationship.declinedCount + 1, lastInteraction: new Date().toISOString() },
+    }));
+    pushMessage("ai", "好，那我先不記。");
+  }
+
   return (
     <div style={{ display: "flex", flexDirection: "column", flex: 1, minHeight: 0, animation: `screenIn 0.55s ${SPRING_SOFT}` }}>
       <div style={{ padding: "18px 20px 4px" }}>
@@ -923,6 +1199,22 @@ function DiscussionScreen({ C, theme, state, setState }) {
                   animation: "typingDot 1.2s ease-in-out infinite", animationDelay: `${i * 0.15}s`,
                 }} />
               ))}
+            </div>
+          </div>
+        )}
+
+        {!typing && state.memory.pendingConfirmation && (
+          <div style={{ marginTop: 4, marginBottom: 10, background: C.surface, border: `1px solid ${C.border}`, borderRadius: 16, padding: 16, animation: `bobIn 0.6s ${SPRING}` }}>
+            <div style={{ display: "flex", gap: 9, alignItems: "flex-start", marginBottom: 14 }}>
+              <span style={{ fontSize: 16, lineHeight: 1.5 }}>💡</span>
+              <div style={{ fontFamily: SANS, fontSize: 13.5, color: C.textPrimary, lineHeight: 1.7 }}>
+                我發現：{phraseForCandidate(state.memory.pendingConfirmation)}
+                <br />要不要讓我記住？
+              </div>
+            </div>
+            <div style={{ display: "flex", gap: 8 }}>
+              <button onClick={handleDeclineMemory} style={ghostBtnStyle(C)}>不用</button>
+              <button onClick={handleAcceptMemory} style={primaryBtnStyle(C)}>記住</button>
             </div>
           </div>
         )}
@@ -1048,6 +1340,12 @@ function InsightCard({ C, label, value, sub }) {
 
 function MyLifeScreen({ C, theme, state, setState, onTestNotification }) {
   const insights = useMemo(() => computeInsights(state), [state.history, state.todayJourney]);
+  const now = new Date();
+  const activeMemories = useMemo(
+    () => Object.values(state.memory.entries).filter((m) => m.status === "active").sort((a, b) => new Date(b.lastUpdate) - new Date(a.lastUpdate)),
+    [state.memory.entries]
+  );
+  const timeline = state.memory.timeline.slice(0, 6);
 
   function setProfileField(key, value) {
     setState((prev) => ({ ...prev, profile: { ...prev.profile, [key]: value } }));
@@ -1064,6 +1362,11 @@ function MyLifeScreen({ C, theme, state, setState, onTestNotification }) {
   function setPersonality(id) {
     setState((prev) => ({ ...prev, aiPersonality: id }));
   }
+  function handleForgetMemory(id) {
+    const mem = state.memory.entries[id];
+    if (!window.confirm(`要請 AI 忘記「${mem?.content}」嗎？`)) return;
+    setState((prev) => forgetMemory(prev, id));
+  }
 
   const personalities = [
     { id: "gentle", label: "溫柔陪伴" }, { id: "coach", label: "理性教練" }, { id: "humor", label: "幽默朋友" },
@@ -1071,8 +1374,8 @@ function MyLifeScreen({ C, theme, state, setState, onTestNotification }) {
 
   return (
     <div style={{ padding: "18px 20px 40px", animation: `screenIn 0.55s ${SPRING_SOFT}` }}>
-      <Eyebrow C={C}>My Life</Eyebrow>
-      <div style={{ fontFamily: SERIF, fontSize: 22, fontStyle: "italic", color: C.textPrimary, marginBottom: 2 }}>我的生活</div>
+      <Eyebrow C={C}>About You</Eyebrow>
+      <div style={{ fontFamily: SERIF, fontSize: 22, fontStyle: "italic", color: C.textPrimary, marginBottom: 2 }}>關於你</div>
       <div style={{ fontFamily: SANS, fontSize: 12.5, color: C.textTertiary, marginBottom: 22 }}>AI 認識你的地方</div>
 
       <SectionLabel C={C}>AI 知道的你</SectionLabel>
@@ -1090,6 +1393,33 @@ function MyLifeScreen({ C, theme, state, setState, onTestNotification }) {
           {insights.mostDelayed && <InsightCard C={C} label="最容易拖延" value={insights.mostDelayed} />}
           {insights.avgFirstTimeLabel && <InsightCard C={C} label="平均開始時間" value={insights.avgFirstTimeLabel} sub="第一件完成的事" />}
         </div>
+      )}
+
+      {activeMemories.length > 0 && (
+        <>
+          <SectionLabel C={C}>Memory</SectionLabel>
+          <Card C={C}>
+            {activeMemories.map((m, i) => (
+              <Row
+                key={m.id} C={C} title={m.content}
+                value={`${MEMORY_CATEGORIES[m.category].label} · 信心 ${getEffectiveConfidence(m, now)}%`}
+                right={<Trash2 size={13} color={C.textTertiary} style={{ cursor: "pointer" }} onClick={() => handleForgetMemory(m.id)} />}
+                isLast={i === activeMemories.length - 1}
+              />
+            ))}
+          </Card>
+        </>
+      )}
+
+      {timeline.length > 0 && (
+        <>
+          <SectionLabel C={C}>最近更新</SectionLabel>
+          <Card C={C}>
+            {timeline.map((t, i) => (
+              <Row key={t.id} C={C} title={t.label} value={`${t.date} · ${TIMELINE_ACTION_LABEL[t.action]}`} isLast={i === timeline.length - 1} />
+            ))}
+          </Card>
+        </>
       )}
 
       <div style={{ marginTop: 40, marginBottom: 4, textAlign: "center" }}>
@@ -1218,7 +1548,7 @@ function BottomNav({ active, setActive, C }) {
   const tabs = [
     { id: "today", label: "Today", icon: Home },
     { id: "discussion", label: "Discussion", icon: MessageCircle },
-    { id: "mylife", label: "My Life", icon: Leaf },
+    { id: "mylife", label: "About You", icon: Leaf },
   ];
   const idx = tabs.findIndex((t) => t.id === active);
   return (
@@ -1261,13 +1591,15 @@ export default function App() {
   useEffect(() => {
     const loaded = loadState();
     const today = todayStr();
+    let next;
     if (loaded.lastOpenedDate && loaded.lastOpenedDate !== today) {
-      setState(rollToNextDay(loaded, { newDate: today }));
+      next = rollToNextDay(loaded, { newDate: today });
     } else if (!loaded.lastOpenedDate) {
-      setState({ ...loaded, lastOpenedDate: today });
+      next = { ...loaded, lastOpenedDate: today };
     } else {
-      setState(loaded);
+      next = loaded;
     }
+    setState(runMemoryDecay(next));
     hydrated.current = true;
   }, []);
 
