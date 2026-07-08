@@ -1,76 +1,60 @@
-# v0.1.1-hotfix — 修復 client-side runtime error
+# v0.1.3.1 — Classifier Read-Before-Write Fix
 
-不是 v0.1.2，Context Engine 完全沒有開始做。這次只修 v0.1.1 部署後出現的
-「Application error: a client-side exception has occurred.」。v0.1.1 的
-功能、UI、資料結構全部不變，舊版本檔案也都沒有被覆蓋。
+修一個你實測發現的真實 bug，不是新功能。舊版本檔案都沒有被覆蓋。
 
-## 找到的真正原因
+## 你回報的現象
+設定姓名為「kri」，在 Discussion 打「我叫什麼名字」，結果姓名被改成
+「什麼名字」。
 
-`components/AlongsideApp.jsx` 第 1665 行（About You 頁的 Memory 列表）：
+## 根本原因
+`我叫什麼名字`（問句）跟 `我叫小明`（陳述句）文法結構完全一樣，姓名偵測
+規則 `/(?:我叫|我的名字是|叫我)([^\s，。！？,.!?]{1,10})/` 只看得懂
+「我叫」後面接文字，看不出「什麼名字」其實是問句的一部分，於是把它當成
+使用者陳述的姓名直接寫入。
 
-```js
-value={`${MEMORY_CATEGORIES[m.category].label} · 信心 ${...}%`}
-```
+這不是單一規則的問題——`我在哪個產業`、`我討厭什麼`、`我每天喝什麼`
+這幾個問句也都會被對應的規則誤判成陳述句，只是你剛好先測到姓名這個。
 
-如果任何一筆 Memory 的 `category` 不是六個已知分類之一，
-`MEMORY_CATEGORIES[m.category]` 會是 `undefined`，緊接著 `.label` 就丟出
-`TypeError: Cannot read properties of undefined (reading 'label')`。因為
-整個 App 沒有任何 Error Boundary，這個例外會直接讓 React 整棵樹連帶崩潰，
-Next.js 只會顯示通用的「Application error」，看不到真正原因。
+## 兩層修復
 
-更深一層的問題：`migrateToV2()` 當時只補了 `memory`／`relationship`／
-`encryption` 三個欄位，`profile`、`discussion`、`todayJourney`、
-`tomorrowJourney` 等其他欄位完全沒有做任何檢查，只是直接把舊資料原封不動
-攤開進來。只要其中任何一個欄位缺漏、型別不對、或內容壞掉（例如儲存空間滿了
-導致寫入寫到一半、或曾經手動在 devtools 改過 localStorage），下一次讀取
-時就有機會在某個畫面炸掉，而且每次炸掉的位置可能都不一樣。
+**第一層：不要把問句誤判成陳述句**
+新增共用的判斷 `looksInterrogative(value)`，只要規則擷取到的內容本身是
+「什麼／甚麼／啥／誰／哪／哪個／哪裡／怎麼／幾」開頭，就不當作陳述句，
+套用在姓名、工作領域、不喜歡、每天習慣、固定服藥這幾條規則上（生日跟
+保健品因為本來就要求數字或特定關鍵字，不受影響）。同時放寬問句判斷，
+「我叫什麼名字」這種沒有問號的問句現在也認得出來。
 
-## 修復內容（對照你列的六點）
+**第二層，也是你真正在意的重點：AI 要先讀已經存的東西，才能判斷新訊息**
 
-**1. Console 錯誤與堆疊** — 已在上方指出實際崩潰的檔案、行號與例外類型。
+這是比姓名 bug 更根本的問題。原本 `applyDirectStatement` 完全沒有檢查
+「這件事是不是已經知道了」——就算你講的內容跟已存的一模一樣，它還是會
+當成新資訊處理，跳出「已更新」卡片。現在改成：
 
-**2. 檢查 localStorage 相容性** — 確認問題不只是「v1 缺欄位」，而是「v1
-或 v2 資料裡任何一個欄位都可能不完整」，`migrateToV2` 原本的作法只覆蓋了
-一部分風險。
+1. 先讀 `state.profile` 裡已經存的值
+2. 跟新訊息比對，判斷這是「已經知道的事」還是「真的新資訊」
+3. 已經知道的事：不寫入、不跳假的更新卡片，AI 回「對，我記得。」
+4. 真的新資訊：正常寫入、正常顯示更新卡片
 
-**3. `loadState` 安全處理舊資料／缺欄位／壞資料** — 拿掉 `migrateToV2`，
-改成統一的 `sanitizeState(raw)`：不管傳進來的是 `undefined`、`null`、
-字串、陣列、還是任意殘缺的物件，一律逐欄位檢查型別並修復，而不是整包
-相信或整包丟棄。`JSON.parse` 本身也包在自己的 try/catch，解析失敗（例如
-資料被截斷）會直接視為沒有資料，重新建立一份全新的初始狀態。
+同樣的道理也套用在回答問題上——問「我叫什麼名字」時，`questionReply`
+現在會直接讀 `context.profile.name` 回答「你是 kri。」，而不是回一句
+不痛不癢的通用回覆。姓名、生日、工作型態這三個問題都接上了。
 
-**4. 所有欄位都有 fallback** — `sanitizeState` 逐一處理：
+## 驗證過的情境
+用 Node 直接測試（不需要開瀏覽器）：
 
-- `profile` / `notifications` / `healthSync` / `relationship`：與預設值
-  做 shallow merge，缺的欄位自動補上
-- `memory.entries`：每一筆都驗證 `id`、`category`（必須是六個已知分類
-  之一，不是就直接捨棄這一筆，不會讓半張壞資料流進畫面）、`confidence`
-  是數字、`status` 是合法值
-- `todayJourney` / `tomorrowJourney`：不是陣列或內容不合法就用預設模板
-  取代；每個項目的 `iconKey`／`phase`／`status` 都驗證合法性
-- `discussion.messages`：過濾掉不是純文字也不是卡片的訊息
-- `history`：不是物件就歸零
+1. 姓名已經是「kri」，再說一次「我叫kri」→ 判定為已知，不寫入、不跳卡片
+2. 問「我叫什麼名字」→ 正確讀出「你是 kri。」（原本 bug 的情境，確認修好了）
+3. 說「我叫小華」（真的要改名）→ 正確判定為新資訊，寫入並顯示更新卡片，
+   `profile.name` 確實變成「小華」
+4. 「我在哪個產業」「我討厭什麼」「我每天喝什麼」「我生日是什麼時候」都
+   正確判定為問句，不會誤寫入 Profile
 
-**5. 壞資料不會讓整個 App crash** — 兩層防護：`sanitizeState` 從源頭
-盡量修好資料，讓崩潰的條件根本不成立；新增的 `ErrorBoundary`
-（React class component）包住整個 App，作為最後一層防護——就算真的出現
-沒預料到的例外，畫面也只會顯示「出了一點問題」＋「重新開始」按鈕，而不是
-Next.js 的通用錯誤頁。按下按鈕會清掉這支 App 自己的 localStorage 並重新
-整理，這是**明確告知的重置**，不是背地裡默默清空。
+## 沒有動到的部分
+buildContext、Context Foundation、Dev Debug Panel、Discussion 的
+quickReplies／step 導引式流程、Memory Engine 資料結構、v0.1.1-hotfix 的
+sanitizeState／Error Boundary，全部與 v0.1.3 相同，一個都沒有改。
 
-**6. 版本號** — `v0.1.1-hotfix`，v0.1.1、v0.1.0 及之前所有版本檔案都沒有
-被覆蓋。
-
-## 驗證方式
-用 Node 直接測試 `sanitizeState()`（不需要瀏覽器）餵進 11 種情境：
-`undefined`、`null`、空物件、字串、陣列、舊 v1 格式、缺 category 的
-Memory、category 是亂資料的 Memory、`todayJourney` 是字串、`profile` 是
-`null`、`discussion.messages` 混雜 `null`／字串／缺欄位物件——全部都能
-正常回傳一份完整可用的 state，沒有拋出例外。另外也驗證了一份完整正常的
-舊資料（含 Journey 進度、Memory、Relationship、對話紀錄）在 sanitize 後
-完全保留，不會被誤判成壞資料而重置。
-
-## 沒有做的事
-- 沒有開始做 v0.1.2 Context Engine
-- 沒有改任何 v0.1.1 的功能、文案、UI、資料結構
-- 沒有加密（`encryption.enabled` 維持 `false`，不在這次範圍內）
+## 給你的資料清理小提醒
+如果你的裝置上姓名目前還是被 bug 改成的「什麼名字」，這是舊資料，不會
+自動修正——到 About You → 個人資訊 → 姓名，點一下手動改回「kri」即可，
+這個修好之後同樣的話術不會再發生了。

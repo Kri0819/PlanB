@@ -7,17 +7,22 @@ import {
 } from "lucide-react";
 
 /* ----------------------------------------------------------------------
-   同行｜Alongside — v0.1.1-hotfix
-   Fixes a client-side crash ("Application error") caused by malformed or
-   partial localStorage data. loadState() now runs everything through
-   sanitizeState(), which validates and repairs every top-level and
-   nested field (profile, memory entries, relationship, discussion,
-   today/tomorrow journeys) instead of trusting stored data at face
-   value. A React Error Boundary now wraps the whole app as a last-resort
-   safety net, offering a visible, explicit reset instead of a dead page.
-   No v0.1.1 features, data structures, or UI changed — this is a pure
-   robustness fix. Context Engine (v0.1.2) work is intentionally not
-   included here, per instruction.
+   同行｜Alongside — v0.1.3.1 "Classifier Fix"
+   Fixes a real bug found in testing: "我叫什麼名字" (a question) was
+   grammatically identical to "我叫小明" (a statement), so the name-
+   detection rule captured "什麼名字" as if it were the stated name and
+   silently overwrote the profile. Root cause was systemic — several
+   direct-statement rules had the same vulnerability. Two-part fix:
+   (1) every rule that captures free text now rejects interrogative
+   captures (什麼/誰/哪/怎麼/幾...); (2) questionReply now actually
+   answers identity questions (name/birthday/work) from context.profile
+   instead of falling through to a generic reply. Also fixed a deeper
+   issue the same bug exposed: applyDirectStatement never checked whether
+   a stated fact was already known, so repeating something true fired a
+   false "已更新" card every time — it now detects already-known values
+   first and acknowledges them as such ("對，我記得。") instead of
+   re-announcing an update that didn't happen. No data structure, UI, or
+   other v0.1.3 behavior changed.
 ---------------------------------------------------------------------- */
 
 const STORAGE_KEY = "alongside_state_v1";
@@ -263,6 +268,15 @@ const PROFILE_FIELD_META = {
   medications: { section: "生活偏好", label: "固定藥物" },
 };
 
+// A captured value that's itself an interrogative word means the message
+// was a question using statement-shaped grammar ("我叫什麼名字"), not an
+// actual statement ("我叫小明") — matching "我叫" alone can't tell these
+// apart, so anything captured here gets checked before being trusted.
+const INTERROGATIVE = /^(什麼|甚麼|啥|誰|哪|哪個|哪裡|怎麼|幾)/;
+function looksInterrogative(value) {
+  return INTERROGATIVE.test(value);
+}
+
 // Things the person states directly about themselves in Discussion get
 // remembered right away — no need to ask, they said it outright. Each
 // rule returns { field?, value?, appendField?, category?, content?,
@@ -275,7 +289,7 @@ function detectDirectStatement(text) {
   let m;
 
   m = text.match(/(?:我叫|我的名字是|叫我)([^\s，。！？,.!?]{1,10})/);
-  if (m) return { field: "name", value: m[1] };
+  if (m && !looksInterrogative(m[1])) return { field: "name", value: m[1] };
 
   m = text.match(/我(?:的)?生日(?:是|在)?\s*(\d{1,2}月\d{1,2}[日號])/);
   if (m) return { field: "birthday", value: m[1] };
@@ -288,22 +302,22 @@ function detectDirectStatement(text) {
   }
 
   m = text.match(/我(?:現在)?在([^\s，。！？,.!?]{1,8}業)/);
-  if (m) return { category: "work", content: `工作領域：${m[1]}`, confidence: 88, field: "workType", value: m[1] };
+  if (m && !looksInterrogative(m[1])) return { category: "work", content: `工作領域：${m[1]}`, confidence: 88, field: "workType", value: m[1] };
   if (/加班/.test(text)) return { category: "work", content: "最近常常加班", confidence: 85, field: "workType", value: "最近常常加班" };
   if (/很忙|忙翻|忙死|忙不過來/.test(text)) return { category: "work", content: "最近工作比較忙碌", confidence: 82, field: "workType", value: "最近比較忙碌" };
 
   if (/固定服藥|固定吃藥/.test(text)) return { category: "habit", content: "固定服藥", confidence: 90, field: "medications", value: "固定服藥", appendField: true };
   m = text.match(/固定(?:服用|吃)([^\s，。！？,.!?]{1,10}藥[^\s，。！？,.!?]{0,4})/);
-  if (m) return { category: "habit", content: `固定服用${m[1]}`, confidence: 90, field: "medications", value: m[1], appendField: true };
+  if (m && !looksInterrogative(m[1])) return { category: "habit", content: `固定服用${m[1]}`, confidence: 90, field: "medications", value: m[1], appendField: true };
 
   m = text.match(/固定(?:吃|服用)([^\s，。！？,.!?]{0,4}(?:魚油|維他命[^\s，。！？,.!?]{0,3}|B群|益生菌|鈣片|葉黃素)[^\s，。！？,.!?]{0,4})/);
   if (m) return { category: "habit", content: `固定吃${m[1]}`, confidence: 90, field: "supplements", value: m[1], appendField: true };
 
   m = text.match(/(?:討厭|不喜歡|不吃)([^\s，。！？,.!?]{1,6})/);
-  if (m) return { category: "dislike", content: `不喜歡${m[1]}`, confidence: 88, field: "dislikedFoods", value: m[1], appendField: true };
+  if (m && !looksInterrogative(m[1])) return { category: "dislike", content: `不喜歡${m[1]}`, confidence: 88, field: "dislikedFoods", value: m[1], appendField: true };
 
   m = text.match(/每天(?:都)?(?:喝|吃)([^\s，。！？,.!?]{1,6})/);
-  if (m) return { category: "habit", content: `每天喝${m[1]}`, confidence: 80, field: "diet", value: `每天喝${m[1]}`, appendField: true };
+  if (m && !looksInterrogative(m[1])) return { category: "habit", content: `每天喝${m[1]}`, confidence: 80, field: "diet", value: `每天喝${m[1]}`, appendField: true };
 
   m = text.match(/正在(減肥|瘦身|戒[^\s，。！？,.!?]{1,4}|調整作息)/);
   if (m) return { category: "recent_state", content: `目前${m[1]}中` };
@@ -317,19 +331,27 @@ function detectDirectStatement(text) {
 // vague "got it".
 function applyDirectStatement(state, statement) {
   let next = state;
+  let alreadyKnown = false;
+
+  if (statement.field) {
+    const currentVal = state.profile[statement.field] || "";
+    alreadyKnown = statement.appendField ? currentVal.includes(statement.value) : currentVal === statement.value;
+  }
+
   if (statement.category && statement.content) {
+    // Reinforcing something already known still refreshes confidence/lastUpdate
+    // (repeating it is itself a signal it's still true) — but doesn't touch profile again.
     next = upsertMemory(next, { category: statement.category, content: statement.content, confidence: statement.confidence || 80, source: "discussion" });
   }
+
   let changed = null;
-  if (statement.field) {
+  if (statement.field && !alreadyKnown) {
     const meta = PROFILE_FIELD_META[statement.field];
     const profile = { ...next.profile };
     let displayValue = statement.value;
     if (statement.appendField) {
       const existingVal = profile[statement.field] || "";
-      if (!existingVal.includes(statement.value)) {
-        profile[statement.field] = existingVal ? `${existingVal}、${statement.value}` : statement.value;
-      }
+      profile[statement.field] = existingVal ? `${existingVal}、${statement.value}` : statement.value;
       displayValue = profile[statement.field];
     } else {
       profile[statement.field] = statement.value;
@@ -337,7 +359,7 @@ function applyDirectStatement(state, statement) {
     next = { ...next, profile };
     if (meta) changed = { section: meta.section, label: meta.label, value: displayValue };
   }
-  return { state: next, changed };
+  return { state: next, changed, alreadyKnown };
 }
 
 // Correction language ("其實", "後來", "改成"...) plus a successfully
@@ -346,17 +368,19 @@ function applyDirectStatement(state, statement) {
 // fact, so the AI can acknowledge it as a correction.
 const MODIFY_CUES = /其實|後來|現在改|已經改|不再|改成/;
 
-function detectModification(text, state) {
+// Only needs the profile slice of context — kept intentionally narrow
+// rather than the whole context object, since that's all it checks.
+function detectModification(text, profile) {
   if (!MODIFY_CUES.test(text)) return null;
   const statement = detectDirectStatement(text);
   if (!statement || !statement.field) return null;
-  const prevValue = state.profile[statement.field];
+  const prevValue = profile[statement.field];
   if (!statement.appendField && prevValue === statement.value) return null;
   return statement;
 }
 
 /* ----------------------------------------------------------------------
-   Memory Classifier (v0.1.1)
+   Memory Classifier (v0.1.1, now reading from context — v0.1.3)
 
    Every free-text message the person types gets classified before the AI
    decides how to respond — this only applies to typed input, not the
@@ -373,52 +397,84 @@ function detectModification(text, state) {
    from actual behavior in Journey/history via detectInferredCandidate,
    unchanged from v0.1.0, and still always goes through the confirmation
    card rather than being auto-applied.
+
+   classifyMessage/chitchatReply/questionReply/detectInferredCandidate no
+   longer take `state` — they take `context` (from buildContext(state)),
+   so they can only see the same curated snapshot everything else reads.
+   Applying a change still goes through applyDirectStatement(state, ...)
+   directly, since that's a write, not a read.
 ---------------------------------------------------------------------- */
 
-function classifyMessage(text, state) {
-  const modification = detectModification(text, state);
+function classifyMessage(text, context) {
+  const modification = detectModification(text, context.profile);
   if (modification) return { intent: "modify", statement: modification };
 
   const direct = detectDirectStatement(text);
   if (direct) return { intent: "info", statement: direct };
 
   const trimmed = text.trim();
-  if (/[?？]$/.test(trimmed) || /^(為什麼|怎麼|要不要|可以嗎|該不該|是不是)/.test(trimmed)) {
+  if (
+    /[?？]$/.test(trimmed) ||
+    /^(為什麼|怎麼|要不要|可以嗎|該不該|是不是)/.test(trimmed) ||
+    /(什麼|甚麼|哪個|哪裡|是誰|幾點|幾件)/.test(trimmed)
+  ) {
     return { intent: "question" };
   }
 
   return { intent: "chitchat" };
 }
 
-function chitchatReply(text) {
+function chitchatReply(text, context) {
   if (/^(嗨|哈囉|你好|hi|hello)/i.test(text.trim())) return "嗨，最近過得還好嗎？";
   if (/累|辛苦|煩|壓力/.test(text)) return "聽起來有點累，要不要休息一下？";
   if (/開心|不錯|很好|順利/.test(text)) return "聽起來今天不錯，很替你開心。";
+  if (context && context.userSignals && context.userSignals.seemsBusy) return "最近感覺你蠻忙的，這陣子還好嗎？";
   return "嗯嗯，我在聽，想多聊聊嗎？";
 }
 
-function questionReply() {
+function questionReply(text, context) {
+  if (context) {
+    const trimmed = (text || "").trim();
+    if (/我叫什麼|我的名字(是|叫)什麼|我叫啥/.test(trimmed)) {
+      return context.profile.name ? `你是 ${context.profile.name}。` : "你還沒有告訴我你的名字，要不要告訴我？";
+    }
+    if (/生日是(什麼|幾)|我的生日/.test(trimmed)) {
+      return context.profile.birthday ? `你的生日是 ${context.profile.birthday}。` : "我還不知道你的生日，要不要告訴我？";
+    }
+    if (/我(現在)?(在做|是做)什麼工作|我的工作/.test(trimmed)) {
+      return context.profile.workType ? `你目前是「${context.profile.workType}」。` : "這個我還不清楚，要不要跟我說說？";
+    }
+    if (/還剩|剩下/.test(trimmed)) {
+      return context.today.allDone
+        ? "今天的都完成囉。"
+        : `還有 ${context.remainingJourneyItems.length} 件事，現在是「${context.currentJourneyItem ? context.currentJourneyItem.label : ""}」。`;
+    }
+    if (/完成.*幾件|做了幾件/.test(trimmed)) return `目前完成了 ${context.today.completedCount} 件事。`;
+  }
   return "這個我還沒辦法很肯定地回答你，但我會把這個問題放在心上。";
 }
 
 // Patterns the AI notices on its own (from what's actually been completed
 // over time) are treated as inferences, not facts — these must be
 // confirmed before becoming a Memory. Deliberately conservative: needs a
-// real run of history and a strong, consistent signal.
-function detectInferredCandidate(state) {
-  const historyEntries = Object.values(state.history).map((d) => d.entries || []);
-  if (historyEntries.length < 3) return null;
+// real run of history and a strong, consistent signal. Reads from
+// context.recentHistory (last 7 days) rather than the full unbounded
+// history — a natural, slightly tighter scope now that it goes through
+// the same context everything else uses.
+function detectInferredCandidate(context) {
+  const days = context.recentHistory;
+  if (days.length < 3) return null;
   const freq = {};
-  historyEntries.forEach((entries) => entries.forEach((e) => { freq[e.label] = (freq[e.label] || 0) + 1; }));
-  const totalDays = historyEntries.length;
+  days.forEach((d) => d.completedLabels.forEach((label) => { freq[label] = (freq[label] || 0) + 1; }));
+  const totalDays = days.length;
   const watchWords = ["奶茶", "咖啡", "散步"];
   const [label] = Object.entries(freq)
     .filter(([l, count]) => count / totalDays >= 0.8 && watchWords.some((w) => l.includes(w)))
     .sort((a, b) => b[1] - a[1])[0] || [];
   if (!label) return null;
   const content = `喜歡${label}`;
-  const already = Object.values(state.memory.entries).some((m) => m.content === content && m.status !== "archived");
-  const declined = (state.memory.declinedSignatures || []).includes(content);
+  const already = context.activeMemories.some((m) => m.content === content);
+  const declined = (context.declinedSignatures || []).includes(content);
   if (already || declined) return null;
   return { category: "preference", content, confidence: 70, source: "journey_pattern" };
 }
@@ -457,6 +513,119 @@ function computeRelationshipSummary(relationship) {
   const acceptRate = totalResponses > 0 ? Math.round((relationship.acceptedCount / totalResponses) * 100) : null;
   const trust = Math.min(100, Math.round(relationship.totalDiscussions * 3 + (acceptRate || 50) * 0.5));
   return { chatFrequency, acceptRate, trust };
+}
+
+/* ----------------------------------------------------------------------
+   Context Foundation (v0.1.3)
+
+   buildContext(state) is the one place that reads the raw state object
+   for AI decision-making. Every function that needs to "think" about the
+   person's situation (classifyMessage, chitchatReply, questionReply,
+   detectInferredCandidate) now takes this context instead of reaching
+   into state directly — so there's a single, inspectable snapshot of
+   "everything the AI knows right now" rather than each function quietly
+   assuming its own slice of state. This does not change what Discussion
+   does yet (step/quickReplies are untouched, per instruction) — it only
+   changes what the underlying functions are allowed to read from.
+
+   Two context fields — `declinedSignatures` and the trimmed `history`
+   used inside detectInferredCandidate — go slightly beyond the literal
+   field list because detectInferredCandidate would otherwise lose its
+   existing "don't ask again right away" behavior. Both are still purely
+   derived from state.memory, nothing new is stored.
+---------------------------------------------------------------------- */
+
+function buildContext(state) {
+  const nowDate = new Date();
+  const hour = nowDate.getHours();
+  const now = {
+    iso: nowDate.toISOString(),
+    hour,
+    dayOfWeek: nowDate.getDay(),
+    isMorning: hour >= 5 && hour < 11,
+    isAfternoon: hour >= 11 && hour < 17,
+    isEvening: hour >= 17 && hour < 22,
+    isLateNight: hour >= 22 || hour < 5,
+  };
+
+  const journey = state.todayJourney;
+  const completedItems = journey.filter((i) => i.completedAt);
+  const remainingItems = journey.filter((i) => i.status !== "done");
+  const currentJourneyItem = journey.find((i) => i.status === "current") || null;
+  const currentIdx = currentJourneyItem ? journey.findIndex((i) => i.id === currentJourneyItem.id) : -1;
+  const nextJourneyItem =
+    (currentIdx >= 0 ? journey.slice(currentIdx + 1).find((i) => i.status === "upcoming") : journey.find((i) => i.status === "upcoming")) || null;
+
+  const totalCount = journey.length;
+  const completedCount = completedItems.length;
+  const today = {
+    completedCount,
+    totalCount,
+    completionRate: totalCount > 0 ? Math.round((completedCount / totalCount) * 100) : 0,
+    hasStartedToday: completedCount > 0,
+    allDone: completedCount > 0 && completedCount >= totalCount,
+  };
+
+  const activeMemories = Object.values(state.memory.entries)
+    .filter((m) => m.status === "active")
+    .map((m) => ({
+      id: m.id, category: m.category, content: m.content, confidence: m.confidence,
+      effectiveConfidence: getEffectiveConfidence(m, nowDate),
+      lastUpdate: m.lastUpdate, source: m.source,
+    }));
+
+  const recentMessages = state.discussion.messages.slice(-8).map((m) => {
+    if (m.type === "card") {
+      return { role: m.role || "ai", text: `[已更新] ${m.section || ""}${m.label ? " " + m.label : ""}${m.value ? "：" + m.value : ""}`.trim() };
+    }
+    return { role: m.role || "ai", text: typeof m.text === "string" ? m.text : "" };
+  });
+
+  const historyDates = Object.keys(state.history);
+  const recentHistory = historyDates.slice(-7).map((date) => {
+    const entries = (state.history[date] && state.history[date].entries) || [];
+    return { date, completedLabels: entries.map((e) => e.label), completedCount: entries.length };
+  });
+
+  const currentPhase = currentJourneyItem
+    ? currentJourneyItem.phase
+    : now.isMorning ? "morning" : now.isAfternoon ? "midday" : now.isEvening ? "night" : "day";
+
+  const insights = computeInsights(state);
+  const memoryText = activeMemories.map((m) => m.content).join(" ");
+  const relationshipSummary = computeRelationshipSummary(state.relationship);
+
+  const userSignals = {
+    seemsBusy: /忙|加班/.test(memoryText),
+    seemsTired: /累|睡眠不足|沒睡好|沒睡飽/.test(memoryText),
+    talksOften: state.relationship.totalDiscussions >= 5,
+    acceptsSuggestionsOften: (relationshipSummary.acceptRate || 0) >= 60,
+    hasFoodDelayPattern: /早餐|第一餐|空腹/.test(memoryText) || (insights.ready && !!insights.avgFirstTimeLabel && parseInt(insights.avgFirstTimeLabel.split(":")[0], 10) >= 10),
+    hasSleepPattern: activeMemories.some((m) => m.category === "habit" && /睡/.test(m.content)),
+    hasWorkStressMemory: activeMemories.some((m) => m.category === "work"),
+  };
+
+  return {
+    now,
+    today,
+    profile: { ...state.profile },
+    currentJourneyItem,
+    nextJourneyItem,
+    remainingJourneyItems: remainingItems.map((i) => ({ id: i.id, label: i.label, status: i.status, phase: i.phase })),
+    completedJourneyItems: completedItems.map((i) => ({ id: i.id, label: i.label, completedAt: i.completedAt })),
+    tomorrowJourney: state.tomorrowJourney.map((i) => ({ id: i.id, label: i.label, sub: i.sub, reason: i.reason })),
+    goals: state.goals,
+    activeMemories,
+    recentMessages,
+    relationshipSummary,
+    recentHistory,
+    currentPhase,
+    userSignals,
+    // Not in the original field list, but detectInferredCandidate needs
+    // it to avoid re-suggesting something already declined — see note
+    // in the comment above.
+    declinedSignatures: state.memory.declinedSignatures || [],
+  };
 }
 
 function ensureCurrent(items) {
@@ -1242,7 +1411,7 @@ function DiscussionScreen({ C, theme, state, setState }) {
     setState((prev) => {
       let next = bumpRelationshipOpened(prev);
       if (!next.memory.pendingConfirmation) {
-        const candidate = detectInferredCandidate(next);
+        const candidate = detectInferredCandidate(buildContext(next));
         if (candidate) next = { ...next, memory: { ...next.memory, pendingConfirmation: candidate } };
       }
       return next;
@@ -1327,36 +1496,45 @@ function DiscussionScreen({ C, theme, state, setState }) {
   // Typed free text goes through the Memory Classifier: figure out what
   // kind of message this is, then decide whether to reply, update
   // Memory, update About You, or ask for confirmation — not the same
-  // flow for every message.
+  // flow for every message. One context snapshot is built per message and
+  // reused for every function that needs to read the situation, so they
+  // can never disagree about what "now" looks like mid-turn.
   function advanceFreeText(userText) {
     pushMessage("user", userText);
-    const classification = classifyMessage(userText, state);
+    const context = buildContext(state);
+    const classification = classifyMessage(userText, context);
 
     if (classification.intent === "info" || classification.intent === "modify") {
       const { statement } = classification;
       let changed = null;
+      let alreadyKnown = false;
       setState((prev) => {
         const result = applyDirectStatement(prev, statement);
         changed = result.changed;
+        alreadyKnown = result.alreadyKnown;
         return result.state;
       });
       setTyping(true);
       setTimeout(() => {
         setTyping(false);
-        pushMessage("ai", classification.intent === "modify" ? "好，幫你更新一下。" : "好，我記下來了。");
-        if (changed) pushCard(changed);
+        if (alreadyKnown) {
+          pushMessage("ai", "對，我記得。");
+        } else {
+          pushMessage("ai", classification.intent === "modify" ? "好，幫你更新一下。" : "好，我記下來了。");
+          if (changed) pushCard(changed);
+        }
       }, 900);
       return;
     }
 
     if (classification.intent === "question") {
       setTyping(true);
-      setTimeout(() => { setTyping(false); pushMessage("ai", questionReply()); }, 900);
+      setTimeout(() => { setTyping(false); pushMessage("ai", questionReply(userText, context)); }, 900);
       return;
     }
 
     setTyping(true);
-    setTimeout(() => { setTyping(false); pushMessage("ai", chitchatReply(userText)); }, 900);
+    setTimeout(() => { setTyping(false); pushMessage("ai", chitchatReply(userText, context)); }, 900);
   }
 
   function handleSend() {
@@ -1600,6 +1778,78 @@ function InsightCard({ C, label, value, sub }) {
 }
 
 /* ----------------------------------------------------------------------
+   Dev Debug Panel (v0.1.3) — collapsed by default, lets a developer
+   confirm buildContext(state) is producing what they expect. Doesn't
+   affect normal use: no data is written, nothing here is read by the
+   rest of the app.
+---------------------------------------------------------------------- */
+
+function DevDebugPanel({ C, state }) {
+  const [expanded, setExpanded] = useState(false);
+  const [copied, setCopied] = useState(false);
+  const context = useMemo(() => buildContext(state), [state]);
+  const json = useMemo(() => {
+    try {
+      return JSON.stringify(context, null, 2);
+    } catch (e) {
+      return "(無法序列化 context)";
+    }
+  }, [context]);
+
+  function handleCopy() {
+    try {
+      navigator.clipboard.writeText(json);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1500);
+    } catch (e) {
+      /* clipboard unavailable in this environment */
+    }
+  }
+
+  return (
+    <div style={{ marginTop: 40 }}>
+      <button
+        onClick={() => setExpanded((e) => !e)}
+        style={{
+          display: "flex", alignItems: "center", justifyContent: "center", gap: 6, width: "100%",
+          background: "transparent", border: "none", cursor: "pointer", padding: "8px 0",
+          fontFamily: SANS, fontSize: 11.5, fontWeight: 500, color: C.textTertiary,
+        }}
+      >
+        <span>Developer</span>
+        <ChevronDown size={12} style={{ transition: `transform 0.4s ${SPRING_SOFT}`, transform: expanded ? "rotate(180deg)" : "rotate(0deg)" }} />
+      </button>
+      <div style={{ display: "grid", gridTemplateRows: expanded ? "1fr" : "0fr", transition: `grid-template-rows 0.45s ${SPRING_SOFT}` }}>
+        <div style={{ overflow: "hidden" }}>
+          <div style={{ position: "relative", marginTop: 8 }}>
+            <button
+              onClick={handleCopy}
+              style={{
+                position: "absolute", top: 8, right: 8, padding: "4px 10px", borderRadius: 999,
+                border: `1px solid ${C.border}`, background: C.surface, color: C.textSecondary,
+                fontFamily: SANS, fontSize: 10.5, fontWeight: 600, cursor: "pointer", zIndex: 1,
+              }}
+            >
+              {copied ? "已複製" : "複製"}
+            </button>
+            <pre
+              style={{
+                margin: 0, background: C.surfaceAlt, borderRadius: 12, padding: "14px 12px",
+                fontSize: 10, lineHeight: 1.6, color: C.textSecondary, overflowX: "auto",
+                maxHeight: 340, overflowY: "auto", border: `1px solid ${C.border}`,
+                fontFamily: "ui-monospace, 'SF Mono', Menlo, monospace", whiteSpace: "pre",
+              }}
+            >
+              {json}
+            </pre>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* ----------------------------------------------------------------------
    My Life screen
 ---------------------------------------------------------------------- */
 
@@ -1781,6 +2031,8 @@ function MyLifeScreen({ C, theme, state, setState, onTestNotification }) {
         }} />
         <Row C={C} icon={Upload} iconBg={C.accent2Soft} iconColor={C.accent2} title="匯入資料" onClick={() => {}} isLast />
       </Card>
+
+      <DevDebugPanel C={C} state={state} />
     </div>
   );
 }
