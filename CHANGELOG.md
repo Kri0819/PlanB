@@ -1,48 +1,54 @@
-# v0.1.3.2 — Renamed to PlanB
+# v0.1.3.3 — Question Matching Robustness
 
-程式名稱從「同行｜Alongside」全面更新為「PlanB」。
+同一類 bug 的第二個實例，你截圖抓到的：問「我是什麼時候生日」沒有得到
+正確回答，跟 v0.1.3.1 修的「我叫什麼名字」是同一個病根。
 
-## 名字的意思
-即使生活不嚴謹、不緊湊也沒關係。今天不想做，我們就不做。
-生活永遠有 Plan B，你也永遠有選擇的權利。
+## 發生了什麼事（照截圖還原）
+1. 「我是什麼時候生日」→ 回「嗯嗯，我在聽，想多聊聊嗎？」
+   這是在 v0.1.3.1 修復**之前**的舊版程式，這句話沒有「？」結尾也不是
+   「為什麼／怎麼」開頭，當時的問句判斷完全抓不到，直接被當成閒聊
+2. 「我的生日是什麼時候」→ 正確回「你的生日是 2000.11.28。」
+   這是重新部署新版之後，剛好完全符合當時寫死的比對順序
+3. 「我是什麼時候生日」（跟第 1 句一模一樣）→ 回「這個我還沒辦法很肯定地
+   回答你」
+   這次問句已經正確被判斷成「question」了（v0.1.3.1 有修到這一步），但
+   `questionReply` 裡回答生日的規則寫成 `生日是(什麼|幾)|我的生日`——
+   只認得「生日是什麼」或「我的生日」開頭這種固定詞序，「我是什麼時候
+   生日」把「生日」放在句尾，就完全不吻合，掉回通用的那句話
 
-## 全面更新了哪些地方
+## 根本原因
+跟 v0.1.3.1 是同一個模式：規則寫的是「一種特定講法」，不是「這個問題在問
+什麼」。中文問句詞序很自由，「我的生日是什麼時候」「我是什麼時候生日」
+「生日什麼時候」講的是同一件事，但只要規則是按固定詞序寫的 regex，就只
+認得剛好符合那個詞序的講法。
 
-**程式碼**
-- `components/AlongsideApp.jsx` → `components/PlanBApp.jsx`（檔名與內部
-  註解一併更新）
-- `pages/index.js` 的 import 對應更新
-- localStorage key：`alongside_state_v1` → `planb_state_v1`
-- `loadState()` 新增一次性遷移：新 key 沒有資料時，會自動檢查舊 key，
-  把資料讀出來、用既有的 `sanitizeState` 清洗過後存進新 key，再刪除舊
-  key——既有使用者的 Journey／Memory／History／Discussion 對話紀錄不會
-  遺失，也不會留下新舊兩份重複資料
-- 匯出檔名 `alongside-data.json` → `planb-data.json`
-- Error Boundary 的 console 訊息 `"Alongside crashed"` → `"PlanB crashed"`
-- About You 頁面「已經同行 N 天」改為「已經一起 N 天」（拿掉舊品牌用字，
-  意思不變）
+## 修法
+不再比對固定詞序，改成「主題詞 + 疑問詞同時出現在這句話裡」：
 
-**專案設定檔**
-- `package.json` 的 `name` 改為 `planb-ai-life-companion`
-- `pages/_document.js`：新增 `<title>PlanB — AI 生活夥伴</title>`，
-  `<meta name="description">` 改寫為包含品牌理念的文案
-- `README.md` 全面改寫，新增「關於改名」段落說明資料遷移邏輯
+```js
+const QUESTION_MARKER = /什麼|甚麼|啥|幾|哪/;
 
-**資料夾**
-- 專案資料夾從 `alongside-app` 改名為 `planb-app`
+if (/生日/.test(text) && QUESTION_MARKER.test(text)) { ... }
+if (/(名字|叫)/.test(text) && QUESTION_MARKER.test(text)) { ... }
+if (/(工作|產業|職業)/.test(text) && QUESTION_MARKER.test(text)) { ... }
+```
 
-## 驗證方式
-用 Node 模擬一個「舊使用者」情境：在假的 `localStorage` 裡塞一份完整的
-`alongside_state_v1` 資料（含姓名、Journey、History、Relationship），
-呼叫新版 `loadState()` 後確認：
+不管「生日」跟「什麼」誰在前誰在後，只要兩個都出現就判定是在問生日。
+順便把工作的主題詞從只認「工作」擴充成也認「產業」「職業」（原本
+「我在哪個產業」也會答不出來）。
 
-1. 資料正確讀出（姓名、工作型態、History 都在）
-2. 存檔後新 key `planb_state_v1` 出現、舊 key `alongside_state_v1` 被移除
-3. 再次載入時直接從新 key 讀取，資料仍然一致
+## 驗證過的講法（全部正確答出已存的資料）
+生日：「我是什麼時候生日」「我的生日是什麼時候」「生日什麼時候」
+「我生日是什麼」
 
-三項都通過，確認改名不會讓任何人原本的資料消失。
+姓名：「我叫什麼名字」「我的名字是什麼」「我名字什麼」
+
+工作：「我是做什麼工作的」「我的工作是什麼」「我在哪個產業」
+「我做什麼職業」
+
+也確認了「我的生日」這種沒有疑問詞的純陳述句，正確地**不會**被錯認成
+問句（維持原本的閒聊回覆），避免反過來過度敏感。
 
 ## 沒有動到的部分
-Today／Discussion／About You 的版面、互動、動畫、Memory Engine、
-Context Foundation（buildContext）、Dev Debug Panel、v0.1.3.1 的
-Classifier 修復，全部維持不變——這次純粹是名稱與對應的技術遷移。
+v0.1.3.1 修的「陳述句 vs 問句」誤判、「已讀取已存內容才判斷」的邏輯，
+以及 v0.1.3.2 的改名／localStorage 遷移，都沒有再變動。

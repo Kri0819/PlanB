@@ -7,19 +7,17 @@ import {
 } from "lucide-react";
 
 /* ----------------------------------------------------------------------
-   PlanB — v0.1.3.2 "Renamed from Alongside"
+   PlanB — v0.1.3.3 "Question Matching Robustness"
 
-   Product renamed from 同行｜Alongside to PlanB. The idea: even a life
-   that isn't tidy or tightly scheduled is fine — if you don't want to do
-   something today, you don't have to. There's always a Plan B, and
-   you always have the choice.
-
-   This is a naming change only — no UI redesign, no new features, no
-   behavior change beyond the rename itself. localStorage key changed
-   from "alongside_state_v1" to "planb_state_v1"; loadState() migrates
-   any existing data from the old key exactly once (read, sanitize,
-   remove the old key) so nobody's Journey/Memory/history is lost just
-   because the product got a new name.
+   Fixes a second instance of the same class of bug as v0.1.3.1: matching
+   one exact phrasing instead of the underlying concept. questionReply's
+   identity-lookup answers (name/birthday/work) only matched specific
+   fixed word orders — "我的生日是什麼時候" worked, but "我是什麼時候生日"
+   (same question, different word order, completely natural in Chinese)
+   silently fell through to the generic "我還沒辦法回答" line. Fixed by
+   checking for topic keywords (生日/名字/叫/工作/產業/職業) plus an
+   interrogative marker (什麼/幾/哪...) appearing anywhere in the message,
+   instead of one fixed sequence. No other behavior changed.
 ---------------------------------------------------------------------- */
 
 const STORAGE_KEY = "planb_state_v1";
@@ -433,16 +431,23 @@ function chitchatReply(text, context) {
   return "嗯嗯，我在聽，想多聊聊嗎？";
 }
 
+// Chinese questions don't have fixed word order — "我的生日是什麼時候",
+// "我是什麼時候生日", and "生日什麼時候" all ask the exact same thing.
+// Matching one exact phrasing (as the previous version did) silently
+// misses the others. This checks for the topic and an interrogative
+// marker appearing anywhere in the message, not a specific sequence.
+const QUESTION_MARKER = /什麼|甚麼|啥|幾|哪/;
+
 function questionReply(text, context) {
   if (context) {
     const trimmed = (text || "").trim();
-    if (/我叫什麼|我的名字(是|叫)什麼|我叫啥/.test(trimmed)) {
+    if (/(名字|叫)/.test(trimmed) && QUESTION_MARKER.test(trimmed)) {
       return context.profile.name ? `你是 ${context.profile.name}。` : "你還沒有告訴我你的名字，要不要告訴我？";
     }
-    if (/生日是(什麼|幾)|我的生日/.test(trimmed)) {
+    if (/生日/.test(trimmed) && QUESTION_MARKER.test(trimmed)) {
       return context.profile.birthday ? `你的生日是 ${context.profile.birthday}。` : "我還不知道你的生日，要不要告訴我？";
     }
-    if (/我(現在)?(在做|是做)什麼工作|我的工作/.test(trimmed)) {
+    if (/(工作|產業|職業)/.test(trimmed) && QUESTION_MARKER.test(trimmed)) {
       return context.profile.workType ? `你目前是「${context.profile.workType}」。` : "這個我還不清楚，要不要跟我說說？";
     }
     if (/還剩|剩下/.test(trimmed)) {
