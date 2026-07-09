@@ -1,6 +1,9 @@
-# 同行｜Alongside — AI 生活夥伴 Prototype
+# PlanB — AI 生活夥伴 Prototype
 
-v0.0.3 · Living Data — 讓生活開始被記錄
+即使生活不嚴謹、不緊湊也沒關係。今天不想做，我們就不做。
+生活永遠有 Plan B，你也永遠有選擇的權利。
+
+v0.1.3.2 · Renamed from 同行｜Alongside
 
 ## 本機開發
 
@@ -18,7 +21,7 @@ npm run dev
    ```bash
    git init
    git add .
-   git commit -m "v0.0.3 Living Data"
+   git commit -m "v0.1.3.2 Rename to PlanB"
    git branch -M main
    git remote add origin <你的 repo URL>
    git push -u origin main
@@ -33,7 +36,7 @@ npm run dev
 ```
 .
 ├── components/
-│   └── AlongsideApp.jsx   # 完整 App（Today / Discussion / My Life）
+│   └── PlanBApp.jsx       # 完整 App（Today / Discussion / About You）
 ├── pages/
 │   ├── _app.js
 │   ├── _document.js
@@ -42,11 +45,27 @@ npm run dev
 └── next.config.js
 ```
 
+## 關於改名
+
+產品從「同行｜Alongside」改名為「PlanB」。既有使用者裝置上舊的
+localStorage 資料（key: `alongside_state_v1`）會在第一次載入時自動、
+安全地搬到新的 key（`planb_state_v1`），Journey、Memory、History、
+Discussion 對話紀錄都不會遺失，搬移完成後舊的 key 會被清除，不會留下
+重複資料。這個邏輯在 `components/PlanBApp.jsx` 的 `loadState()` 裡。
+
 ## 版本紀錄
 
-- **v0.0.3 — Living Data**：資料開始真正被記錄。加入 Local Storage 持久化
-  （關閉重開資料不變）、Journey 可新增／編輯／刪除／拖曳排序、完成任務會記錄
-  時間並在跨日時歸檔、Discussion 會真正修改「明天的計畫」與 Goals、
-  My Life 個人資料變成可編輯、新增基本提醒通知（測試用）。詳見下方完整說明。
-- **v0.0.2** — Today 首頁重新設計：單一「下一步」卡片、Journey 預設收合、
-  加入自然語氣的「為什麼」說明、整體視覺更安靜。
+- **v0.1.3.2** — 產品改名為 PlanB，含 localStorage key 安全遷移
+- **v0.1.3.1** — 修復 Memory Classifier 誤判問句為陳述句的 bug
+  （例如「我叫什麼名字」被誤存成姓名），並修好 applyDirectStatement
+  沒有檢查「這件事是不是已經知道」就直接判定為新資訊的根本問題
+- **v0.1.3** — Context Foundation：新增 `buildContext(state)`，
+  Memory Classifier 相關函式改讀整理過的情境快照
+- **v0.1.1-hotfix** — 修復因不完整 localStorage 資料造成的
+  client-side crash，新增 `sanitizeState`／Error Boundary
+- **v0.1.1** — Chat Intelligence & Memory Classification
+- **v0.1.0** — Memory Engine（信心值、衰退、Observation、Timeline、
+  Relationship）
+- **v0.0.4.1 / v0.0.4** — 真實 App Shell、UI/UX 重構
+- **v0.0.3** — Living Data：Local Storage 持久化、可編輯 Journey
+- **v0.0.2** — Today 首頁重新設計

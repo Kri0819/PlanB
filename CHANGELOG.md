@@ -1,60 +1,48 @@
-# v0.1.3.1 — Classifier Read-Before-Write Fix
+# v0.1.3.2 — Renamed to PlanB
 
-修一個你實測發現的真實 bug，不是新功能。舊版本檔案都沒有被覆蓋。
+程式名稱從「同行｜Alongside」全面更新為「PlanB」。
 
-## 你回報的現象
-設定姓名為「kri」，在 Discussion 打「我叫什麼名字」，結果姓名被改成
-「什麼名字」。
+## 名字的意思
+即使生活不嚴謹、不緊湊也沒關係。今天不想做，我們就不做。
+生活永遠有 Plan B，你也永遠有選擇的權利。
 
-## 根本原因
-`我叫什麼名字`（問句）跟 `我叫小明`（陳述句）文法結構完全一樣，姓名偵測
-規則 `/(?:我叫|我的名字是|叫我)([^\s，。！？,.!?]{1,10})/` 只看得懂
-「我叫」後面接文字，看不出「什麼名字」其實是問句的一部分，於是把它當成
-使用者陳述的姓名直接寫入。
+## 全面更新了哪些地方
 
-這不是單一規則的問題——`我在哪個產業`、`我討厭什麼`、`我每天喝什麼`
-這幾個問句也都會被對應的規則誤判成陳述句，只是你剛好先測到姓名這個。
+**程式碼**
+- `components/AlongsideApp.jsx` → `components/PlanBApp.jsx`（檔名與內部
+  註解一併更新）
+- `pages/index.js` 的 import 對應更新
+- localStorage key：`alongside_state_v1` → `planb_state_v1`
+- `loadState()` 新增一次性遷移：新 key 沒有資料時，會自動檢查舊 key，
+  把資料讀出來、用既有的 `sanitizeState` 清洗過後存進新 key，再刪除舊
+  key——既有使用者的 Journey／Memory／History／Discussion 對話紀錄不會
+  遺失，也不會留下新舊兩份重複資料
+- 匯出檔名 `alongside-data.json` → `planb-data.json`
+- Error Boundary 的 console 訊息 `"Alongside crashed"` → `"PlanB crashed"`
+- About You 頁面「已經同行 N 天」改為「已經一起 N 天」（拿掉舊品牌用字，
+  意思不變）
 
-## 兩層修復
+**專案設定檔**
+- `package.json` 的 `name` 改為 `planb-ai-life-companion`
+- `pages/_document.js`：新增 `<title>PlanB — AI 生活夥伴</title>`，
+  `<meta name="description">` 改寫為包含品牌理念的文案
+- `README.md` 全面改寫，新增「關於改名」段落說明資料遷移邏輯
 
-**第一層：不要把問句誤判成陳述句**
-新增共用的判斷 `looksInterrogative(value)`，只要規則擷取到的內容本身是
-「什麼／甚麼／啥／誰／哪／哪個／哪裡／怎麼／幾」開頭，就不當作陳述句，
-套用在姓名、工作領域、不喜歡、每天習慣、固定服藥這幾條規則上（生日跟
-保健品因為本來就要求數字或特定關鍵字，不受影響）。同時放寬問句判斷，
-「我叫什麼名字」這種沒有問號的問句現在也認得出來。
+**資料夾**
+- 專案資料夾從 `alongside-app` 改名為 `planb-app`
 
-**第二層，也是你真正在意的重點：AI 要先讀已經存的東西，才能判斷新訊息**
+## 驗證方式
+用 Node 模擬一個「舊使用者」情境：在假的 `localStorage` 裡塞一份完整的
+`alongside_state_v1` 資料（含姓名、Journey、History、Relationship），
+呼叫新版 `loadState()` 後確認：
 
-這是比姓名 bug 更根本的問題。原本 `applyDirectStatement` 完全沒有檢查
-「這件事是不是已經知道了」——就算你講的內容跟已存的一模一樣，它還是會
-當成新資訊處理，跳出「已更新」卡片。現在改成：
+1. 資料正確讀出（姓名、工作型態、History 都在）
+2. 存檔後新 key `planb_state_v1` 出現、舊 key `alongside_state_v1` 被移除
+3. 再次載入時直接從新 key 讀取，資料仍然一致
 
-1. 先讀 `state.profile` 裡已經存的值
-2. 跟新訊息比對，判斷這是「已經知道的事」還是「真的新資訊」
-3. 已經知道的事：不寫入、不跳假的更新卡片，AI 回「對，我記得。」
-4. 真的新資訊：正常寫入、正常顯示更新卡片
-
-同樣的道理也套用在回答問題上——問「我叫什麼名字」時，`questionReply`
-現在會直接讀 `context.profile.name` 回答「你是 kri。」，而不是回一句
-不痛不癢的通用回覆。姓名、生日、工作型態這三個問題都接上了。
-
-## 驗證過的情境
-用 Node 直接測試（不需要開瀏覽器）：
-
-1. 姓名已經是「kri」，再說一次「我叫kri」→ 判定為已知，不寫入、不跳卡片
-2. 問「我叫什麼名字」→ 正確讀出「你是 kri。」（原本 bug 的情境，確認修好了）
-3. 說「我叫小華」（真的要改名）→ 正確判定為新資訊，寫入並顯示更新卡片，
-   `profile.name` 確實變成「小華」
-4. 「我在哪個產業」「我討厭什麼」「我每天喝什麼」「我生日是什麼時候」都
-   正確判定為問句，不會誤寫入 Profile
+三項都通過，確認改名不會讓任何人原本的資料消失。
 
 ## 沒有動到的部分
-buildContext、Context Foundation、Dev Debug Panel、Discussion 的
-quickReplies／step 導引式流程、Memory Engine 資料結構、v0.1.1-hotfix 的
-sanitizeState／Error Boundary，全部與 v0.1.3 相同，一個都沒有改。
-
-## 給你的資料清理小提醒
-如果你的裝置上姓名目前還是被 bug 改成的「什麼名字」，這是舊資料，不會
-自動修正——到 About You → 個人資訊 → 姓名，點一下手動改回「kri」即可，
-這個修好之後同樣的話術不會再發生了。
+Today／Discussion／About You 的版面、互動、動畫、Memory Engine、
+Context Foundation（buildContext）、Dev Debug Panel、v0.1.3.1 的
+Classifier 修復，全部維持不變——這次純粹是名稱與對應的技術遷移。
