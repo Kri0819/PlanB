@@ -95,3 +95,21 @@ Discussion Flow（`decisionEngine`／`classifyMessage`／
 `detectDirectStatement` 等）、Journey、UI、聊天體驗完全沒有改一行。
 `upsertMemory` 的呼叫端（`applyDecision`、`handleAcceptMemory`）也是
 一行都沒動——這次全部的改動都封裝在 Memory Engine 內部。
+
+---
+
+## Hotfix (same v0.1.5)
+剛剛推上去的版本部署後出現 `Failed to compile` / `Expected ';', '}' or <eof>`
+（`components/PlanBApp.jsx:33:1`）。原因：更新版本說明註解時，
+str_replace 只換掉了舊註解區塊的「第一行」，舊註解剩下的內容沒有被清掉，
+變成一段沒有包在 `/* ... */` 裡的裸露文字，直接被當成程式碼解析，
+導致語法錯誤。
+
+修復方式：刪除那段孤立在註解區塊外面的殘留文字。修好後重新用 Node 驗證
+過整支檔案：`/*` 與 `*/` 數量對稱（26/26）、大括號與小括號都平衡、
+Memory Merge／Decision Engine 全流程重新跑過一次，結果與修復前完全一致。
+
+這次的教訓：balance-check（大括號/小括號計數）不會抓到這種「文字掉出
+註解區塊」的錯誤，因為註解本來就不影響括號平衡。以後修改大段註解時，
+會直接用「取代整個舊註解區塊（含開頭與結尾）」的方式，而不是只換開頭
+那一行。

@@ -33,32 +33,6 @@ import {
      instead of an unbounded dump of every active entry.
 ---------------------------------------------------------------------- */
 
-   Discussion no longer runs on step/quickReplies/advanceScripted — all
-   three are gone. Every typed message now goes through one pipeline:
-   classifyMessage() -> decisionEngine(context) -> applyDecision(state,
-   decision) -> reply. decisionEngine has no memory of "which turn" it's
-   on; the only thing carried between messages is discussion.thread, a
-   single general "what are we currently figuring out" slot (used only
-   when a short reply like "可以"/"沒有" can't be understood without
-   knowing what was just asked) — not a script position.
-
-   Per turn, decisionEngine judges, in order: (1) is this answering an
-   open thread; (2-4) is this a new fact — handled via the existing
-   Memory Classifier, whose output now feeds updates through
-   decisionEngine instead of writing directly; (5) does this call for a
-   Tomorrow Journey change — either reluctance-driven (ask why first,
-   only adjust, never delete) or a direct request (move a time, add a
-   reminder); (6) otherwise, what actually fits right now — answer,
-   comfort, encouragement, or genuine conversation. conversationBalance
-   (recentlyAskedTooMuch) prevents back-to-back questions from feeling
-   like a questionnaire; proactiveCheckIn lets the AI bring up something
-   it already remembers instead of only ever reacting.
-
-   No RAG, no external API calls, no embeddings, no Supabase, no vector
-   search — everything here is deterministic pattern matching over
-   buildContext(state), same as every version before it. No UI changes.
----------------------------------------------------------------------- */
-
 const STORAGE_KEY = "planb_state_v1";
 // v0.0.x through v0.1.3.1 stored data under the old product name. Read
 // once as a fallback if the new key has nothing yet, then retired —
