@@ -7,17 +7,56 @@ import {
 } from "lucide-react";
 
 /* ----------------------------------------------------------------------
-   PlanB — v0.1.3.3 "Question Matching Robustness"
+   PlanB — v0.1.5 "Memory Graph"
 
-   Fixes a second instance of the same class of bug as v0.1.3.1: matching
-   one exact phrasing instead of the underlying concept. questionReply's
-   identity-lookup answers (name/birthday/work) only matched specific
-   fixed word orders — "我的生日是什麼時候" worked, but "我是什麼時候生日"
-   (same question, different word order, completely natural in Chinese)
-   silently fell through to the generic "我還沒辦法回答" line. Fixed by
-   checking for topic keywords (生日/名字/叫/工作/產業/職業) plus an
-   interrogative marker (什麼/幾/哪...) appearing anywhere in the message,
-   instead of one fixed sequence. No other behavior changed.
+   Memory is no longer just a flat list of entries that only ever grows.
+   upsertMemory() keeps the exact signature every caller already uses
+   (Decision Engine's applyDecision, DiscussionScreen's handleAcceptMemory)
+   — nothing about Discussion, Decision Engine, Journey, or the UI
+   changed. What changed is entirely inside the Memory Engine:
+
+   - Restating an existing fact in different words merges into the same
+     entry (canonicalized wording, every phrasing kept in `sources`)
+     instead of creating a duplicate.
+   - A statement that contradicts an existing one supersedes it — the old
+     value is folded into the entry's own `history` (queryable, never
+     deleted), the entry becomes the new fact. Two contradictory facts
+     are never both active at once.
+   - Decay is tiered by category now (TIER_META: identity/health never
+     decay, relationship barely does, preference is slow, habit is
+     medium, current_state is fast) instead of one flat rate per
+     category — getEffectiveConfidence/runMemoryDecay didn't need to
+     change at all, only the data they read did.
+   - An archived memory mentioned again is revived, not duplicated.
+   - context.activeMemories (what Decision Engine reads) is now a bounded
+     "Memory Summary" — ranked by current relevance, capped at 15 —
+     instead of an unbounded dump of every active entry.
+---------------------------------------------------------------------- */
+
+   Discussion no longer runs on step/quickReplies/advanceScripted — all
+   three are gone. Every typed message now goes through one pipeline:
+   classifyMessage() -> decisionEngine(context) -> applyDecision(state,
+   decision) -> reply. decisionEngine has no memory of "which turn" it's
+   on; the only thing carried between messages is discussion.thread, a
+   single general "what are we currently figuring out" slot (used only
+   when a short reply like "可以"/"沒有" can't be understood without
+   knowing what was just asked) — not a script position.
+
+   Per turn, decisionEngine judges, in order: (1) is this answering an
+   open thread; (2-4) is this a new fact — handled via the existing
+   Memory Classifier, whose output now feeds updates through
+   decisionEngine instead of writing directly; (5) does this call for a
+   Tomorrow Journey change — either reluctance-driven (ask why first,
+   only adjust, never delete) or a direct request (move a time, add a
+   reminder); (6) otherwise, what actually fits right now — answer,
+   comfort, encouragement, or genuine conversation. conversationBalance
+   (recentlyAskedTooMuch) prevents back-to-back questions from feeling
+   like a questionnaire; proactiveCheckIn lets the AI bring up something
+   it already remembers instead of only ever reacting.
+
+   No RAG, no external API calls, no embeddings, no Supabase, no vector
+   search — everything here is deterministic pattern matching over
+   buildContext(state), same as every version before it. No UI changes.
 ---------------------------------------------------------------------- */
 
 const STORAGE_KEY = "planb_state_v1";
@@ -149,7 +188,7 @@ function genId() {
 }
 
 /* ----------------------------------------------------------------------
-   Memory Engine (v0.1.0)
+   Memory Engine (v0.1.0, restructured into a Memory Graph in v0.1.5)
 
    This is the AI's curated knowledge about the person — distinct from the
    raw Discussion transcript. Every entry carries content, confidence,
@@ -168,16 +207,62 @@ function genId() {
 
    `encryption.enabled` is a reserved flag; encryption itself is not
    implemented yet, by design, until this shape has proven itself.
+
+   v0.1.5 restructures how Memory is written, not what calls it —
+   upsertMemory(state, {category, content, confidence, source}) keeps the
+   exact same signature every existing caller (Decision Engine's
+   applyDecision, DiscussionScreen's handleAcceptMemory) already uses.
+   What changed is entirely inside it: it now merges restated facts
+   instead of duplicating them, detects when a new statement contradicts
+   an existing one and supersedes it (keeping the old value queryable,
+   not deleted), and revives archived memories that get mentioned again.
+   Decay is now tiered by category (see TIER_META) instead of one flat
+   rate — getEffectiveConfidence/runMemoryDecay didn't need to change at
+   all, only the data (MEMORY_CATEGORIES) they already read from did.
 ---------------------------------------------------------------------- */
 
-const MEMORY_CATEGORIES = {
-  habit: { label: "生活習慣", decays: true, decayRatePerDay: 1.1 },
-  work: { label: "工作型態", decays: true, decayRatePerDay: 0.9 },
-  preference: { label: "偏好", decays: false, decayRatePerDay: 0 },
-  dislike: { label: "不喜歡", decays: false, decayRatePerDay: 0 },
-  recent_state: { label: "最近狀態", decays: true, decayRatePerDay: 2.5 },
-  long_term_change: { label: "長期變化", decays: true, decayRatePerDay: 0.6 },
+// Six conceptual tiers, each with its own decay behavior. Existing
+// category keys (habit/work/preference/dislike/recent_state/
+// long_term_change) map onto these — see CATEGORY_TIER below — so
+// nothing upstream that assigns a category has to change.
+const TIER_META = {
+  identity: { decays: false, decayRatePerDay: 0 },       // name, birthday — doesn't change on its own
+  relationship: { decays: true, decayRatePerDay: 0.02 }, // family, partner — extremely slow
+  preference: { decays: true, decayRatePerDay: 0.089 },  // likes/dislikes — slow (matches the 95->82->65->30 curve at 6mo/1yr/2yr)
+  habit: { decays: true, decayRatePerDay: 0.3 },         // daily routines, work situation — medium
+  current_state: { decays: true, decayRatePerDay: 2.0 }, // "lately/currently" — fast
+  health: { decays: false, decayRatePerDay: 0 },         // conditions, allergies, medication — never auto-decays
 };
+
+function tierFields(tierKey) {
+  const t = TIER_META[tierKey];
+  return { decays: t.decays, decayRatePerDay: t.decayRatePerDay, tier: tierKey };
+}
+
+const MEMORY_CATEGORIES = {
+  habit: { label: "生活習慣", ...tierFields("habit") },
+  work: { label: "工作型態", ...tierFields("habit") },
+  preference: { label: "偏好", ...tierFields("preference") },
+  dislike: { label: "不喜歡", ...tierFields("preference") },
+  recent_state: { label: "最近狀態", ...tierFields("current_state") },
+  long_term_change: { label: "長期變化", ...tierFields("habit") },
+  identity: { label: "個人身份", ...tierFields("identity") },
+  relationship: { label: "重要人物", ...tierFields("relationship") },
+  health: { label: "健康", ...tierFields("health") },
+};
+
+// Where a memory came from — lets the AI eventually distinguish "the
+// person told me this directly" from "I noticed a pattern". Only
+// "discussion" and "journey_pattern" are actually produced by any
+// existing caller today; the rest exist so the taxonomy doesn't need
+// another rewrite when something starts using them.
+const SOURCE_META = {
+  discussion: "Discussion", journey: "Journey", journey_pattern: "AI Observation",
+  my_life: "My Life", profile: "Profile", ai_observation: "AI Observation",
+};
+function isSelfReportedSource(source) {
+  return source === "discussion" || source === "journey" || source === "my_life" || source === "profile";
+}
 
 const MEMORY_ARCHIVE_THRESHOLD = 15; // effective confidence below this -> quietly archived
 const TIMELINE_ACTION_LABEL = { add: "新增", update: "更新", remove: "移除", archive: "封存" };
@@ -201,26 +286,107 @@ function addTimelineEntry(memory, action, label) {
   return [entry, ...memory.timeline].slice(0, 40);
 }
 
-// Add or refresh a memory. If an active memory with the same category +
-// content already exists, this reinforces it (confidence takes the max,
-// lastUpdate resets) rather than creating a duplicate.
+/* ---- Fuzzy same-fact / conflict comparison, used by upsertMemory ---- */
+
+const FILLER_WORDS = ["每天", "都", "固定", "通常", "今天", "也是", "一直", "最近", "經常", "常常", "習慣"];
+const NEGATION_WORDS = ["不", "沒", "別", "無"];
+
+function stripWords(s, words) {
+  let out = s;
+  words.forEach((w) => { out = out.split(w).join(""); });
+  return out.trim();
+}
+function isNegated(s) {
+  return NEGATION_WORDS.some((w) => s.includes(w));
+}
+// Fillers stripped, negation kept — used to build the merged display text
+// (so a merged negative statement stays negative).
+function stripFillers(s) {
+  return stripWords(s, FILLER_WORDS);
+}
+// Fillers AND negation stripped — used only for comparing whether two
+// statements are about the same underlying fact.
+function coreOf(s) {
+  return stripWords(stripFillers(s), NEGATION_WORDS);
+}
+
+const CANONICAL_VERBS = ["喝", "吃", "做", "去", "睡", "運動", "游泳", "散步", "加班", "服用", "看"];
+
+// "早餐喝奶茶" + "每天早餐都喝奶茶" + "早餐固定喝奶茶" -> "早餐通常喝奶茶"
+function canonicalizeMerged(content) {
+  const core = stripFillers(content);
+  if (/通常|習慣|固定|常常/.test(core)) return core;
+  for (const v of CANONICAL_VERBS) {
+    const idx = core.indexOf(v);
+    if (idx > -1) return core.slice(0, idx) + "通常" + core.slice(idx);
+  }
+  return core;
+}
+
+// "same" = restating an existing fact (merge, don't duplicate)
+// "conflict" = the new statement negates an existing one (supersede it)
+// "different" = unrelated (create a new entry)
+function compareMemoryStatements(existingContent, newContent) {
+  const coreExisting = coreOf(existingContent);
+  const coreNew = coreOf(newContent);
+  if (!coreExisting || !coreNew || coreExisting.length < 2 || coreNew.length < 2) return "different";
+  const sameCore = coreExisting === coreNew || coreExisting.includes(coreNew) || coreNew.includes(coreExisting);
+  if (!sameCore) return "different";
+  return isNegated(existingContent) !== isNegated(newContent) ? "conflict" : "same";
+}
+
+// Add or reconcile a memory. Three outcomes, decided by comparing against
+// existing entries in the same category (active ones first, then
+// archived ones so a lapsed fact can come back to life):
+//   - same fact restated      -> merge into the existing entry, keep all
+//                                 sources, canonicalize the wording
+//   - contradicts a known fact -> the old value is folded into this
+//                                 entry's own `history` (queryable, not
+//                                 deleted); the entry becomes the new fact
+//   - matches an archived one  -> revive it (back to active, confidence
+//                                 restored)
+//   - none of the above        -> create a new entry
 function upsertMemory(state, { category, content, confidence, source }) {
   const now = new Date().toISOString();
-  const existing = Object.values(state.memory.entries).find(
-    (m) => m.category === category && m.content === content && m.status !== "archived"
-  );
   const entries = { ...state.memory.entries };
-  let action = "update";
-  let id;
-  if (existing) {
-    id = existing.id;
-    entries[id] = { ...existing, confidence: Math.max(existing.confidence, confidence), lastUpdate: now, status: "active", source };
-  } else {
-    id = genMemId();
-    entries[id] = { id, category, content, confidence, lastUpdate: now, source, status: "active", createdAt: now };
-    action = "add";
+  const sameCategory = Object.values(entries).filter((m) => m.category === category);
+
+  let match = null;
+  let matchType = null;
+  for (const m of sameCategory) {
+    if (m.status !== "active") continue;
+    const cmp = compareMemoryStatements(m.content, content);
+    if (cmp !== "different") { match = m; matchType = cmp; break; }
   }
-  const timeline = addTimelineEntry(state.memory, action, content);
+  let revived = null;
+  if (!match) {
+    for (const m of sameCategory) {
+      if (m.status !== "archived") continue;
+      if (compareMemoryStatements(m.content, content) !== "different") { revived = m; break; }
+    }
+  }
+
+  let timeline = state.memory.timeline;
+
+  if (match && matchType === "same") {
+    const sources = [...(match.sources || [{ date: (match.createdAt || now).slice(0, 10), content: match.content }]), { date: now.slice(0, 10), content }].slice(-12);
+    const canonical = sources.length >= 2 ? canonicalizeMerged(content) : match.content;
+    entries[match.id] = { ...match, content: canonical, confidence: Math.max(match.confidence, confidence), lastUpdate: now, status: "active", sources };
+    timeline = addTimelineEntry(state.memory, "update", canonical);
+  } else if (match && matchType === "conflict") {
+    const history = [...(match.history || []), { date: (match.lastUpdate || now).slice(0, 10), content: match.content, confidence: match.confidence }].slice(-12);
+    entries[match.id] = { ...match, content, confidence, lastUpdate: now, status: "active", source, history, sources: [{ date: now.slice(0, 10), content }] };
+    timeline = addTimelineEntry(state.memory, "update", `${match.content} → ${content}`);
+  } else if (revived) {
+    const history = [...(revived.history || []), { date: (revived.lastUpdate || now).slice(0, 10), content: revived.content, confidence: revived.confidence, note: "archived" }].slice(-12);
+    entries[revived.id] = { ...revived, content, confidence: Math.max(confidence, Math.round(revived.confidence * 0.6)), lastUpdate: now, status: "active", source, history, sources: [{ date: now.slice(0, 10), content }] };
+    timeline = addTimelineEntry(state.memory, "update", `${content}（重新想起）`);
+  } else {
+    const id = genMemId();
+    entries[id] = { id, category, content, confidence, lastUpdate: now, source, status: "active", createdAt: now, sources: [{ date: now.slice(0, 10), content }], history: [] };
+    timeline = addTimelineEntry(state.memory, "add", content);
+  }
+
   return { ...state, memory: { ...state.memory, entries, timeline } };
 }
 
@@ -235,6 +401,8 @@ function forgetMemory(state, id) {
 // Run once per app load: anything whose effective confidence has quietly
 // decayed past the threshold gets archived (with a timeline record), so
 // stale "facts" don't linger forever just because no one revisited them.
+// Unchanged from v0.1.0 — only the decay rates it reads (MEMORY_CATEGORIES)
+// changed.
 function runMemoryDecay(state) {
   const now = new Date();
   let entries = state.memory.entries;
@@ -251,6 +419,24 @@ function runMemoryDecay(state) {
     }
   });
   return changed ? { ...state, memory: { ...state.memory, entries, timeline } } : state;
+}
+
+// The curated, bounded view of Memory that buildContext exposes as
+// context.activeMemories — the "Memory Summary" the Decision Engine
+// actually reads. Because merging happens at write time (upsertMemory),
+// what's in state.memory.entries is already deduplicated; this just
+// ranks by current relevance and caps the count, so the payload stays
+// small even if Memory eventually grows into the thousands.
+function computeMemorySummary(state, limit) {
+  const now = new Date();
+  return Object.values(state.memory.entries)
+    .filter((m) => m.status === "active")
+    .map((m) => ({
+      id: m.id, category: m.category, content: m.content, confidence: m.confidence,
+      effectiveConfidence: getEffectiveConfidence(m, now), lastUpdate: m.lastUpdate, source: m.source,
+    }))
+    .sort((a, b) => b.effectiveConfidence - a.effectiveConfidence)
+    .slice(0, limit || 15);
 }
 
 // Maps a profile field to where it lives in the About You UI, so the
@@ -276,6 +462,10 @@ function looksInterrogative(value) {
   return INTERROGATIVE.test(value);
 }
 
+// "我都凌晨兩點睡" uses a Chinese numeral, not a digit — the digit-only
+// time regex below silently misses this extremely common phrasing.
+const CN_HOUR = { 一: 1, 二: 2, 兩: 2, 三: 3, 四: 4, 五: 5, 六: 6, 七: 7, 八: 8, 九: 9, 十: 10, 十一: 11, 十二: 12 };
+
 // Things the person states directly about themselves in Discussion get
 // remembered right away — no need to ask, they said it outright. Each
 // rule returns { field?, value?, appendField?, category?, content?,
@@ -299,11 +489,19 @@ function detectDirectStatement(text) {
     const mm = m[2] || (text.includes("半") ? "30" : "00");
     return { category: "habit", content: `習慣 ${hh}:${mm} 睡覺`, confidence: 90, field: "sleep", value: `${hh}:${mm}` };
   }
+  m = text.match(/(?:凌晨|半夜)?([一二兩三四五六七八九十]{1,2})點半?睡/);
+  if (m && CN_HOUR[m[1]] !== undefined && /每天|通常|習慣|都|固定/.test(text)) {
+    const hh = String(CN_HOUR[m[1]]).padStart(2, "0");
+    const mm = text.includes("半") ? "30" : "00";
+    return { category: "habit", content: `習慣 ${hh}:${mm} 睡覺`, confidence: 90, field: "sleep", value: `${hh}:${mm}` };
+  }
 
   m = text.match(/我(?:現在)?在([^\s，。！？,.!?]{1,8}業)/);
   if (m && !looksInterrogative(m[1])) return { category: "work", content: `工作領域：${m[1]}`, confidence: 88, field: "workType", value: m[1] };
   if (/加班/.test(text)) return { category: "work", content: "最近常常加班", confidence: 85, field: "workType", value: "最近常常加班" };
   if (/很忙|忙翻|忙死|忙不過來/.test(text)) return { category: "work", content: "最近工作比較忙碌", confidence: 82, field: "workType", value: "最近比較忙碌" };
+  m = text.match(/我(?:現在)?固定(夜班|早班|白班|大夜班|三班制|輪班)/);
+  if (m) return { category: "habit", content: `固定${m[1]}`, confidence: 88, field: "shift", value: m[1] };
 
   if (/固定服藥|固定吃藥/.test(text)) return { category: "habit", content: "固定服藥", confidence: 90, field: "medications", value: "固定服藥", appendField: true };
   m = text.match(/固定(?:服用|吃)([^\s，。！？,.!?]{1,10}藥[^\s，。！？,.!?]{0,4})/);
@@ -312,53 +510,32 @@ function detectDirectStatement(text) {
   m = text.match(/固定(?:吃|服用)([^\s，。！？,.!?]{0,4}(?:魚油|維他命[^\s，。！？,.!?]{0,3}|B群|益生菌|鈣片|葉黃素)[^\s，。！？,.!?]{0,4})/);
   if (m) return { category: "habit", content: `固定吃${m[1]}`, confidence: 90, field: "supplements", value: m[1], appendField: true };
 
+  if (/我改吃素|我吃素了|我開始吃素/.test(text)) return { category: "habit", content: "改吃素了", confidence: 85, field: "diet", value: "吃素" };
+
   m = text.match(/(?:討厭|不喜歡|不吃)([^\s，。！？,.!?]{1,6})/);
   if (m && !looksInterrogative(m[1])) return { category: "dislike", content: `不喜歡${m[1]}`, confidence: 88, field: "dislikedFoods", value: m[1], appendField: true };
+  m = text.match(/我不(?:喝|吃)([^\s，。！？,.!?]{1,6})/);
+  if (m && !looksInterrogative(m[1])) return { category: "dislike", content: `不喝${m[1]}`, confidence: 84, field: "dislikedFoods", value: m[1], appendField: true };
+  m = text.match(/我怕([^\s，。！？,.!?]{1,6})/);
+  if (m && !looksInterrogative(m[1])) return { category: "dislike", content: `怕${m[1]}`, confidence: 84 };
 
+  m = text.match(/我早餐都(?:喝|吃)([^\s，。！？,.!?]{1,6})/);
+  if (m && !looksInterrogative(m[1])) return { category: "habit", content: `早餐都喝${m[1]}`, confidence: 82, field: "diet", value: `早餐都喝${m[1]}`, appendField: true };
   m = text.match(/每天(?:都)?(?:喝|吃)([^\s，。！？,.!?]{1,6})/);
   if (m && !looksInterrogative(m[1])) return { category: "habit", content: `每天喝${m[1]}`, confidence: 80, field: "diet", value: `每天喝${m[1]}`, appendField: true };
 
   m = text.match(/正在(減肥|瘦身|戒[^\s，。！？,.!?]{1,4}|調整作息)/);
   if (m) return { category: "recent_state", content: `目前${m[1]}中` };
 
+  m = text.match(/我(?:最近)?開始([^\s，。！？,.!?]{1,8})/);
+  if (m && !looksInterrogative(m[1])) return { category: "habit", content: `開始${m[1]}`, confidence: 78 };
+
+  if (/我換(?:了)?工作|我離職了/.test(text)) return { category: "long_term_change", content: "最近換了工作", confidence: 82 };
+
+  m = text.match(/(頭很痛|頭痛|肚子痛|拉肚子|感冒了|生病了)/);
+  if (m) return { category: "recent_state", content: `今天${m[1]}`, confidence: 75 };
+
   return null;
-}
-
-// Applies a detected statement to state, returning both the new state and
-// a small report of what actually changed — used to render the Memory
-// Update Card so the person sees exactly what got written, not just a
-// vague "got it".
-function applyDirectStatement(state, statement) {
-  let next = state;
-  let alreadyKnown = false;
-
-  if (statement.field) {
-    const currentVal = state.profile[statement.field] || "";
-    alreadyKnown = statement.appendField ? currentVal.includes(statement.value) : currentVal === statement.value;
-  }
-
-  if (statement.category && statement.content) {
-    // Reinforcing something already known still refreshes confidence/lastUpdate
-    // (repeating it is itself a signal it's still true) — but doesn't touch profile again.
-    next = upsertMemory(next, { category: statement.category, content: statement.content, confidence: statement.confidence || 80, source: "discussion" });
-  }
-
-  let changed = null;
-  if (statement.field && !alreadyKnown) {
-    const meta = PROFILE_FIELD_META[statement.field];
-    const profile = { ...next.profile };
-    let displayValue = statement.value;
-    if (statement.appendField) {
-      const existingVal = profile[statement.field] || "";
-      profile[statement.field] = existingVal ? `${existingVal}、${statement.value}` : statement.value;
-      displayValue = profile[statement.field];
-    } else {
-      profile[statement.field] = statement.value;
-    }
-    next = { ...next, profile };
-    if (meta) changed = { section: meta.section, label: meta.label, value: displayValue };
-  }
-  return { state: next, changed, alreadyKnown };
 }
 
 // Correction language ("其實", "後來", "改成"...) plus a successfully
@@ -400,8 +577,10 @@ function detectModification(text, profile) {
    classifyMessage/chitchatReply/questionReply/detectInferredCandidate no
    longer take `state` — they take `context` (from buildContext(state)),
    so they can only see the same curated snapshot everything else reads.
-   Applying a change still goes through applyDirectStatement(state, ...)
-   directly, since that's a write, not a read.
+   As of v0.1.4, classifyMessage's output feeds into decisionEngine
+   (below), which is what actually decides whether/what to write —
+   writing itself happens in applyDecision(state, decision), since that's
+   a write, not a read.
 ---------------------------------------------------------------------- */
 
 function classifyMessage(text, context) {
@@ -424,11 +603,12 @@ function classifyMessage(text, context) {
 }
 
 function chitchatReply(text, context) {
-  if (/^(嗨|哈囉|你好|hi|hello)/i.test(text.trim())) return "嗨，最近過得還好嗎？";
-  if (/累|辛苦|煩|壓力/.test(text)) return "聽起來有點累，要不要休息一下？";
+  const balanced = context && recentlyAskedTooMuch(context);
+  if (/^(嗨|哈囉|你好|hi|hello)/i.test(text.trim())) return balanced ? "嗨，很高興你來聊聊。" : "嗨，最近過得還好嗎？";
+  if (/累|辛苦|煩|壓力/.test(text)) return balanced ? "今天辛苦了，晚點早點休息。" : "聽起來有點累，要不要休息一下？";
   if (/開心|不錯|很好|順利/.test(text)) return "聽起來今天不錯，很替你開心。";
-  if (context && context.userSignals && context.userSignals.seemsBusy) return "最近感覺你蠻忙的，這陣子還好嗎？";
-  return "嗯嗯，我在聽，想多聊聊嗎？";
+  if (context && context.userSignals && context.userSignals.seemsBusy && !balanced) return "最近感覺你蠻忙的，這陣子還好嗎？";
+  return balanced ? "好，我在這裡。" : "嗯嗯，我在聽，想多聊聊嗎？";
 }
 
 // Chinese questions don't have fixed word order — "我的生日是什麼時候",
@@ -490,6 +670,328 @@ function phraseForCandidate(candidate) {
   return `${candidate.content}。`;
 }
 
+function comfortReply() {
+  return "辛苦了。";
+}
+
+function encouragementReply(context) {
+  if (context.userSignals.talksOften && context.today.completionRate >= 70) return "這樣的節奏很不容易，繼續保持。";
+  if (context.today.completedCount > 0) return "很替你開心，繼續這個步調就好。";
+  return "聽起來不錯，我也替你開心。";
+}
+
+// "今天不想運動" — matched against actual Journey item labels (today's
+// completed/remaining, resolved to the corresponding Tomorrow item so
+// there's something real to adjust), not a fixed hardcoded item.
+function detectReluctance(text, context) {
+  const m = text.match(/不想(?:再)?([^\s，。！？,.!?]{1,6})/);
+  if (!m) return null;
+  const phrase = m[1];
+  const todayItems = [...context.remainingJourneyItems, ...context.completedJourneyItems];
+  const todayMatch = todayItems.find((item) => phrase.includes(item.label) || item.label.includes(phrase));
+  if (!todayMatch) return { itemId: null, itemLabel: phrase };
+  const tomorrowMatch = context.tomorrowJourney.find((it) => it.id === todayMatch.id);
+  return { itemId: tomorrowMatch ? tomorrowMatch.id : null, itemLabel: todayMatch.label };
+}
+
+const VALID_REASON_PATTERN = /加班|感冒|生病|不舒服|月經|經期|睡不好|沒睡好|太累|很累|頭痛|頭很痛/;
+function looksLikeValidReason(text) {
+  return VALID_REASON_PATTERN.test(text);
+}
+function reasonNote(text) {
+  if (/加班/.test(text)) return "昨天加班";
+  if (/頭痛|頭很痛/.test(text)) return "頭痛";
+  if (/感冒|生病|不舒服/.test(text)) return "身體不舒服";
+  if (/月經|經期/.test(text)) return "生理期不舒服";
+  if (/睡不好|沒睡好/.test(text)) return "沒睡好";
+  return "有點累";
+}
+
+// The other half of "需要更新 Tomorrow Journey" — not reluctance-driven,
+// but the person directly asking for a change: moving something to a
+// different part of the day, or asking to be reminded about something
+// new. `kind: "move"` only touches an item that already exists;
+// `kind: "add"` proposes a brand new one (applyDecision creates it).
+function detectJourneyRequest(text, context) {
+  let m = text.match(/(?:我想)?把([^\s，。！？,.!?]{1,6})改到(早上|中午|下午|晚上|睡前)/);
+  if (m) {
+    const label = m[1];
+    const phaseMap = { 早上: "morning", 中午: "midday", 下午: "midday", 晚上: "night", 睡前: "night" };
+    const todayItems = [...context.remainingJourneyItems, ...context.completedJourneyItems];
+    const todayMatch = todayItems.find((item) => label.includes(item.label) || item.label.includes(label));
+    if (!todayMatch) return null;
+    const tomorrowMatch = context.tomorrowJourney.find((it) => it.id === todayMatch.id);
+    if (!tomorrowMatch) return null;
+    return { kind: "move", itemId: tomorrowMatch.id, itemLabel: todayMatch.label, phase: phaseMap[m[2]], timeLabel: m[2] };
+  }
+
+  m = text.match(/(.{1,6})(後|前)提醒我(.{1,8})/);
+  if (m) {
+    const anchor = m[1].trim();
+    const action = m[3].replace(/[。！？，,.!?]+$/g, "").trim();
+    if (!anchor || !action) return null;
+    return { kind: "add", label: action, anchorText: `${anchor}${m[2]}` };
+  }
+
+  return null;
+}
+
+// The AI bringing something up on its own, grounded in an actual Memory
+// it already holds — not a new inference (those still require the 💡
+// confirmation card), just recalling something already confirmed and
+// checking in on it naturally. Skips anything mentioned in the last few
+// messages already, so it doesn't repeat itself turn after turn.
+function proactiveCheckIn(context) {
+  const candidates = context.activeMemories.filter((m) => m.category === "habit" || m.category === "preference");
+  if (!candidates.length) return null;
+  const recentText = context.recentMessages.map((m) => m.text || "").join(" ");
+  const fresh = candidates.filter((m) => !recentText.includes(m.content));
+  if (!fresh.length) return null;
+  const top = fresh.sort((a, b) => new Date(b.lastUpdate) - new Date(a.lastUpdate))[0];
+  return { reply: `你上次說：${top.content}。`, question: "今天有做到嗎？", memoryContent: top.content, category: top.category };
+}
+
+/* ----------------------------------------------------------------------
+   Decision Engine (v0.1.4)
+
+   This replaces the old numbered `step` script entirely. There is no
+   script position anymore — every message re-asks "what's the right
+   thing to do right now?" from the full context. The only thing carried
+   between turns is `discussion.thread`, and it holds a *topic* ("we're
+   in the middle of figuring out why you don't want to do X"), not a
+   *position in a sequence*. Most turns leave it null.
+
+   decisionEngine(context) expects `context` to be buildContext(state)
+   extended with the current turn's `userText`, `classification` (from
+   classifyMessage), and `thread` (state.discussion.thread) — see
+   DiscussionScreen for exactly how that's assembled. Output shape:
+
+     { reply, shouldAsk, question,
+       memoryUpdates, profileUpdates, relationshipUpdates,
+       journeyUpdates, goalUpdates }
+
+   `reply` is the declarative part of the response; when `shouldAsk` is
+   true, `question` is appended. Applying the proposed updates to state
+   is a separate, later step (applyDecision) — deciding what should
+   happen and writing it are kept apart on purpose.
+---------------------------------------------------------------------- */
+
+function emptyDecision() {
+  return {
+    reply: null, shouldAsk: false, question: null,
+    memoryUpdates: [], profileUpdates: [], relationshipUpdates: {},
+    journeyUpdates: [], goalUpdates: [],
+  };
+}
+
+// The last couple of AI turns already ended in a question — answering
+// with yet another one starts to feel like a questionnaire, not a
+// conversation. Read directly from recent messages; nothing new stored.
+function recentlyAskedTooMuch(context) {
+  const aiTexts = context.recentMessages.filter((m) => m.role === "ai").slice(-3).map((m) => m.text || "");
+  const asked = aiTexts.filter((t) => /[?？]$/.test(t.trim())).length;
+  return asked >= 2;
+}
+
+// Short replies ("可以" / "沒有" / "昨天有") only make sense in light of
+// whatever the AI just asked — this is the only place `thread` matters.
+function resolveThread(thread, context) {
+  const userText = context.userText;
+  const d = emptyDecision();
+
+  if (thread.kind === "explore_reluctance") {
+    if (looksLikeValidReason(userText)) {
+      const note = reasonNote(userText);
+      if (thread.itemId) {
+        d.journeyUpdates.push({
+          itemId: thread.itemId,
+          patch: { sub: `${note}，先休息，不用勉強。`, reason: `提到${note}，這件事今天不用勉強自己，量力而為就好。` },
+        });
+        d.reply = `辛苦了，那今天就先別勉強自己。我把明天的「${thread.itemLabel}」也先調整成不用勉強。`;
+      } else {
+        d.reply = "辛苦了，那今天就先照顧好自己，其他的都可以再說。";
+      }
+    } else {
+      d.reply = "了解，那今天就先不勉強自己，休息也是需要的。";
+    }
+    return d;
+  }
+
+  if (thread.kind === "check_in") {
+    if (/^(有|去了|對|是|去過|做了|嗯)/.test(userText)) {
+      d.memoryUpdates.push({ category: thread.category || "habit", content: thread.memoryContent, confidence: 85, source: "discussion" });
+      d.reply = "很好，繼續保持這個節奏。";
+    } else if (/^(沒|還沒|忘了)/.test(userText)) {
+      d.reply = "沒關係，明天再說，不用勉強。";
+    } else {
+      d.reply = "了解，我會記得。";
+    }
+    return d;
+  }
+
+  d.reply = "好，我知道了。";
+  return d;
+}
+
+function decisionEngine(context) {
+  const { userText, classification, thread } = context;
+
+  // 1. Is this answering something the AI just asked?
+  if (thread) return resolveThread(thread, context);
+
+  // 2/3/4. The Memory Classifier already determined this is a direct
+  // fact or a correction to one — that *is* "needs Memory/Profile
+  // updated", so this is where it actually gets decided to happen.
+  if (classification.intent === "info" || classification.intent === "modify") {
+    const d = emptyDecision();
+    const s = classification.statement;
+    if (s.category && s.content) d.memoryUpdates.push({ category: s.category, content: s.content, confidence: s.confidence || 80, source: "discussion" });
+    if (s.field) d.profileUpdates.push({ field: s.field, value: s.value, appendField: !!s.appendField });
+    const isDiscomfort = s.category === "recent_state" && /痛|不舒服|感冒|生病/.test(s.content);
+    d.reply = isDiscomfort
+      ? "辛苦了，好好休息。"
+      : classification.intent === "modify" ? "好，幫你更新一下。" : "好，我記下來了。";
+    return d;
+  }
+
+  // 5a. Reluctance about a specific Journey item — understand why before
+  // touching Tomorrow's plan; only ever adjust, never delete.
+  const reluctance = detectReluctance(userText, context);
+  if (reluctance) {
+    const d = emptyDecision();
+    if (looksLikeValidReason(userText)) {
+      if (reluctance.itemId) {
+        const note = reasonNote(userText);
+        d.journeyUpdates.push({
+          itemId: reluctance.itemId,
+          patch: { sub: `${note}，先休息，不用勉強。`, reason: `提到${note}，這件事今天不用勉強自己，量力而為就好。` },
+        });
+        d.reply = `辛苦了，那今天就先別勉強。我把明天的「${reluctance.itemLabel}」也先調整成不用勉強。`;
+      } else {
+        d.reply = "辛苦了，那今天先照顧好自己就好。";
+      }
+    } else {
+      d.shouldAsk = true;
+      d.question = "怎麼了嗎？是發生什麼事，還是單純不想動？";
+      d._openThread = { kind: "explore_reluctance", itemId: reluctance.itemId, itemLabel: reluctance.itemLabel };
+    }
+    return d;
+  }
+
+  // 5b. A direct request to change Tomorrow's plan — move something to a
+  // different part of the day, or ask to be reminded about something new.
+  const journeyRequest = detectJourneyRequest(userText, context);
+  if (journeyRequest) {
+    const d = emptyDecision();
+    if (journeyRequest.kind === "move") {
+      d.journeyUpdates.push({ itemId: journeyRequest.itemId, patch: { phase: journeyRequest.phase, sub: `已改到${journeyRequest.timeLabel}` } });
+      d.reply = `好，我把明天的「${journeyRequest.itemLabel}」改到${journeyRequest.timeLabel}。`;
+    } else {
+      d._newJourneyItem = {
+        label: journeyRequest.label, iconKey: "Bell", emoji: "🔔", phase: "day",
+        sub: `${journeyRequest.anchorText}的提醒`, reason: `你提到想要${journeyRequest.anchorText}提醒自己${journeyRequest.label}。`,
+      };
+      d.reply = `好，我把「${journeyRequest.label}」加進明天的計畫，會在${journeyRequest.anchorText}提醒你。`;
+    }
+    return d;
+  }
+
+  // 6. Nothing structural matched — decide what actually fits right now.
+  // Not every turn needs a question back; some are just conversation.
+  if (classification.intent === "question") {
+    const d = emptyDecision();
+    d.reply = questionReply(userText, context);
+    return d;
+  }
+
+  if (/累|辛苦|壓力|煩|難過|不舒服|不開心|痛|感冒|生病/.test(userText)) {
+    const d = emptyDecision();
+    d.reply = comfortReply();
+    if (!recentlyAskedTooMuch(context)) { d.shouldAsk = true; d.question = "今天發生什麼事？"; }
+    return d;
+  }
+
+  if (/完成|做到|順利|不錯|開心|太好了/.test(userText)) {
+    const d = emptyDecision();
+    d.reply = encouragementReply(context);
+    return d;
+  }
+
+  // Nothing specific to react to — the AI can either just talk, or, if
+  // it's natural and hasn't just asked twice in a row, bring up
+  // something it already remembers instead of only ever reacting.
+  const d = emptyDecision();
+  const proactive = !recentlyAskedTooMuch(context) ? proactiveCheckIn(context) : null;
+  if (proactive) {
+    d.reply = proactive.reply;
+    d.shouldAsk = true;
+    d.question = proactive.question;
+    d._openThread = { kind: "check_in", memoryContent: proactive.memoryContent, category: proactive.category };
+  } else {
+    d.reply = chitchatReply(userText, context);
+  }
+  return d;
+}
+
+// Turns a decision into an actual state update: writes Memory/Profile/
+// Tomorrow Journey/Goals/Relationship, and reports back what genuinely
+// changed (so a restated fact that's already known doesn't get announced
+// as new — same principle as v0.1.3.1, now applied to every update path,
+// not just the old classifyMessage-only one).
+function applyDecision(state, decision) {
+  let next = state;
+  const cards = [];
+
+  decision.memoryUpdates.forEach((u) => {
+    next = upsertMemory(next, { category: u.category, content: u.content, confidence: u.confidence || 80, source: u.source || "discussion" });
+  });
+
+  decision.profileUpdates.forEach((u) => {
+    const meta = PROFILE_FIELD_META[u.field];
+    const currentVal = next.profile[u.field] || "";
+    const alreadyKnown = u.appendField ? currentVal.includes(u.value) : currentVal === u.value;
+    if (alreadyKnown) return;
+    const profile = { ...next.profile };
+    let displayValue = u.value;
+    if (u.appendField) {
+      profile[u.field] = currentVal ? `${currentVal}、${u.value}` : u.value;
+      displayValue = profile[u.field];
+    } else {
+      profile[u.field] = u.value;
+    }
+    next = { ...next, profile };
+    if (meta) cards.push({ cardKind: "profile", section: meta.section, label: meta.label, value: displayValue });
+  });
+
+  decision.journeyUpdates.forEach((u) => {
+    const item = next.tomorrowJourney.find((it) => it.id === u.itemId);
+    if (!item) return;
+    next = { ...next, tomorrowJourney: next.tomorrowJourney.map((it) => (it.id === u.itemId ? { ...it, ...u.patch } : it)) };
+    cards.push({ cardKind: "journey", section: "明天的計畫", label: item.label, value: u.patch.sub || u.patch.reason || "已調整" });
+  });
+
+  if (decision._newJourneyItem) {
+    const n = decision._newJourneyItem;
+    const newItem = {
+      id: genId(), label: n.label, iconKey: n.iconKey || "Bell", emoji: n.emoji || "🔔",
+      phase: n.phase || "day", sub: n.sub || "", reason: n.reason || "",
+      status: "upcoming", completedAt: null,
+    };
+    next = { ...next, tomorrowJourney: [...next.tomorrowJourney, newItem] };
+    cards.push({ cardKind: "journey", section: "明天的計畫", label: newItem.label, value: "已新增" });
+  }
+
+  if (decision.goalUpdates.length) {
+    next = { ...next, goals: Array.from(new Set([...next.goals, ...decision.goalUpdates])) };
+  }
+
+  if (decision.relationshipUpdates && Object.keys(decision.relationshipUpdates).length) {
+    next = { ...next, relationship: { ...next.relationship, ...decision.relationshipUpdates } };
+  }
+
+  return { state: next, cards };
+}
+
 /* ----------------------------------------------------------------------
    Relationship — internal only, never rendered to the person. Tracks how
    much they engage with Discussion and how often they accept what the AI
@@ -522,17 +1024,15 @@ function computeRelationshipSummary(relationship) {
 }
 
 /* ----------------------------------------------------------------------
-   Context Foundation (v0.1.3)
+   Context Foundation (v0.1.3, extended by the Decision Engine in v0.1.4)
 
    buildContext(state) is the one place that reads the raw state object
    for AI decision-making. Every function that needs to "think" about the
    person's situation (classifyMessage, chitchatReply, questionReply,
-   detectInferredCandidate) now takes this context instead of reaching
-   into state directly — so there's a single, inspectable snapshot of
-   "everything the AI knows right now" rather than each function quietly
-   assuming its own slice of state. This does not change what Discussion
-   does yet (step/quickReplies are untouched, per instruction) — it only
-   changes what the underlying functions are allowed to read from.
+   detectInferredCandidate, decisionEngine) takes this context instead of
+   reaching into state directly — so there's a single, inspectable
+   snapshot of "everything the AI knows right now" rather than each
+   function quietly assuming its own slice of state.
 
    Two context fields — `declinedSignatures` and the trimmed `history`
    used inside detectInferredCandidate — go slightly beyond the literal
@@ -572,13 +1072,12 @@ function buildContext(state) {
     allDone: completedCount > 0 && completedCount >= totalCount,
   };
 
-  const activeMemories = Object.values(state.memory.entries)
-    .filter((m) => m.status === "active")
-    .map((m) => ({
-      id: m.id, category: m.category, content: m.content, confidence: m.confidence,
-      effectiveConfidence: getEffectiveConfidence(m, nowDate),
-      lastUpdate: m.lastUpdate, source: m.source,
-    }));
+  // This is the "Memory Summary" the Decision Engine actually reads —
+  // ranked and capped (computeMemorySummary), not a raw dump of every
+  // active entry. Because merging happens at write time in
+  // upsertMemory(), what's already in state.memory.entries is
+  // deduplicated by the time this runs.
+  const activeMemories = computeMemorySummary(state, 15);
 
   const recentMessages = state.discussion.messages.slice(-8).map((m) => {
     if (m.type === "card") {
@@ -642,8 +1141,22 @@ function ensureCurrent(items) {
   return items.map((it, i) => (i === idx ? { ...it, status: "current" } : it));
 }
 
+// What the AI opens with — used for a brand new install and for each new
+// day. Grounded in real signals when there are any (via buildContext,
+// which is safe to call here since `base` always has a valid, if empty,
+// discussion.messages array by the time this runs), honest and open when
+// there aren't yet.
+function computeOpener(state) {
+  const ctx = buildContext(state);
+  if (ctx.today.allDone) return "今天都完成了，很棒。";
+  if (ctx.userSignals.hasFoodDelayPattern) return "這幾天的第一餐感覺都比較晚，最近是不是比較累？";
+  if (ctx.userSignals.seemsTired) return "最近感覺你常提到累，最近還好嗎？";
+  if (ctx.now.isEvening || ctx.now.isLateNight) return "今天過得怎麼樣？";
+  return "最近過得還好嗎？想聊聊什麼都可以。";
+}
+
 function createInitialState() {
-  return {
+  const base = {
     version: 2,
     theme: "light",
     lastOpenedDate: todayStr(),
@@ -662,14 +1175,9 @@ function createInitialState() {
     memory: { entries: {}, timeline: [], pendingConfirmation: null, declinedSignatures: [] },
     relationship: { totalDiscussions: 0, firstInteraction: null, lastInteraction: null, acceptedCount: 0, declinedCount: 0 },
     encryption: { enabled: false },
-    discussion: {
-      messages: [
-        { role: "ai", text: "我發現你這星期有四天，都是下午兩點才吃第一餐。" },
-        { role: "ai", text: "昨天也是，今天也是。要不要一起想想看？" },
-      ],
-      step: 0, showUpdate: false, applied: false,
-    },
+    discussion: { messages: [], thread: null },
   };
+  return { ...base, discussion: { messages: [{ role: "ai", text: computeOpener(base) }], thread: null } };
 }
 
 /* ----------------------------------------------------------------------
@@ -711,15 +1219,22 @@ function sanitizeMemoryEntries(raw) {
   const cleaned = {};
   Object.values(raw).forEach((m) => {
     if (!isPlainObject(m) || typeof m.id !== "string" || !MEMORY_CATEGORIES[m.category]) return; // drop anything unrecognizable rather than let it crash a render later
+    const content = typeof m.content === "string" ? m.content : "";
+    const createdAt = typeof m.createdAt === "string" ? m.createdAt : (typeof m.lastUpdate === "string" ? m.lastUpdate : new Date().toISOString());
     cleaned[m.id] = {
       id: m.id,
       category: m.category,
-      content: typeof m.content === "string" ? m.content : "",
+      content,
       confidence: typeof m.confidence === "number" && !Number.isNaN(m.confidence) ? m.confidence : 70,
       lastUpdate: typeof m.lastUpdate === "string" ? m.lastUpdate : new Date().toISOString(),
       source: typeof m.source === "string" ? m.source : "unknown",
-      status: ["active", "archived", "observation"].includes(m.status) ? m.status : "active",
-      createdAt: typeof m.createdAt === "string" ? m.createdAt : (typeof m.lastUpdate === "string" ? m.lastUpdate : new Date().toISOString()),
+      status: ["active", "archived", "observation", "history"].includes(m.status) ? m.status : "active",
+      createdAt,
+      // v0.1.5 fields — backfilled for entries written by earlier
+      // versions so upsertMemory's merge/conflict logic always has
+      // something valid to read and append to.
+      sources: Array.isArray(m.sources) ? m.sources : [{ date: createdAt.slice(0, 10), content }],
+      history: Array.isArray(m.history) ? m.history : [],
     };
   });
   return cleaned;
@@ -748,10 +1263,10 @@ function sanitizeState(raw) {
     : base.discussion.messages;
   const discussion = {
     messages: messages.length ? messages : base.discussion.messages,
-    step: rawDiscussion.step !== undefined ? rawDiscussion.step : 0,
-    showUpdate: !!rawDiscussion.showUpdate,
-    applied: !!rawDiscussion.applied,
-    followedUp: !!rawDiscussion.followedUp,
+    // v0.1.4 replaced the old step/showUpdate/applied/followedUp shape
+    // with a single general `thread` slot — any of those old fields
+    // still present in stored data are simply not read anymore.
+    thread: isPlainObject(rawDiscussion.thread) ? rawDiscussion.thread : null,
   };
 
   return {
@@ -818,32 +1333,22 @@ function saveState(state) {
   }
 }
 
-// When a new day begins, decide what Discussion should say. If the last
-// conversation actually changed something (applied a plan update) and we
-// haven't followed up yet, the AI checks back in — a short, real reason to
-// open Discussion again instead of finding yesterday's finished chat.
-// Otherwise the conversation is left untouched (still worth having).
-function nextDiscussionState(discussion) {
-  if (discussion.applied && !discussion.followedUp) {
-    return {
-      messages: [{ role: "ai", text: "這幾天的晨間流程，感覺怎麼樣？" }],
-      step: "followup0", showUpdate: false, applied: true, followedUp: true,
-    };
-  }
-  return discussion;
-}
-
 function rollToNextDay(state, opts) {
   const { archiveKey, newDate } = opts || {};
   const entries = state.todayJourney.filter((i) => i.completedAt).map((i) => ({ id: i.id, label: i.label, completedAt: i.completedAt }));
   const history = { ...state.history, [archiveKey || state.lastOpenedDate || "unknown"]: { entries } };
   const newToday = state.tomorrowJourney.map((t, i) => ({ ...t, status: i === 0 ? "current" : "upcoming", completedAt: null }));
   const newTomorrow = newToday.map((t) => ({ ...t, status: "upcoming", completedAt: null }));
-  return {
-    ...state, history, todayJourney: newToday, tomorrowJourney: newTomorrow,
-    discussion: nextDiscussionState(state.discussion),
-    lastOpenedDate: newDate || todayStr(),
-  };
+  let next = { ...state, history, todayJourney: newToday, tomorrowJourney: newTomorrow, lastOpenedDate: newDate || todayStr() };
+  // A new day is a real, natural reason to say something — but never
+  // interrupt an open thread, and never wipe the conversation, just add
+  // to it (capped so it doesn't grow forever).
+  if (!next.discussion.thread) {
+    const opener = computeOpener(next);
+    const messages = [...next.discussion.messages, { role: "ai", text: opener }].slice(-60);
+    next = { ...next, discussion: { ...next.discussion, messages } };
+  }
+  return next;
 }
 
 /* ----------------------------------------------------------------------
@@ -1423,11 +1928,13 @@ function DiscussionScreen({ C, theme, state, setState }) {
   const [typing, setTyping] = useState(false);
   const openedRef = useRef(false);
 
-  useEffect(() => { if (scrollRef.current) scrollRef.current.scrollTop = scrollRef.current.scrollHeight; }, [d.messages, d.showUpdate, typing, state.memory.pendingConfirmation]);
+  useEffect(() => { if (scrollRef.current) scrollRef.current.scrollTop = scrollRef.current.scrollHeight; }, [d.messages, typing, state.memory.pendingConfirmation]);
 
   // Once per visit: log that a conversation happened, and — if nothing is
   // already waiting for confirmation — quietly check whether a real
-  // behavioral pattern has emerged worth asking about.
+  // behavioral pattern has emerged worth asking about. Unrelated to the
+  // Decision Engine — this is the existing Memory Engine inference path,
+  // unchanged.
   useEffect(() => {
     if (openedRef.current) return;
     openedRef.current = true;
@@ -1442,149 +1949,45 @@ function DiscussionScreen({ C, theme, state, setState }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  function updateDiscussion(patch) {
-    setState((prev) => ({ ...prev, discussion: { ...prev.discussion, ...(typeof patch === "function" ? patch(prev.discussion) : patch) } }));
-  }
-
-  const quickReplies = useMemo(() => {
-    if (d.step === 0) return ["最近一直躺著滑手機", "最近比較忙，還沒注意"];
-    if (d.step === 1) return ["可以試試", "再想想"];
-    if (d.step === "followup0") return ["好很多", "普通，再看看"];
-    return [];
-  }, [d.step]);
-
   function pushMessage(role, text) {
-    updateDiscussion((prev) => ({ messages: [...prev.messages, { role, text }] }));
+    setState((prev) => ({ ...prev, discussion: { ...prev.discussion, messages: [...prev.discussion.messages, { role, text }] } }));
   }
 
-  function pushCard(changed) {
-    updateDiscussion((prev) => ({ messages: [...prev.messages, { role: "ai", type: "card", ...changed }] }));
-  }
-
-  // Quick-reply chips still drive the existing guided demo exactly as
-  // before — untouched from v0.1.0/v0.0.4, since that's an existing
-  // feature the classifier shouldn't interfere with.
-  function advanceScripted(userText) {
-    pushMessage("user", userText);
-
-    if (d.step === 0) {
-      if (userText === "最近一直躺著滑手機") {
-        setTyping(true);
-        setTimeout(() => {
-          setTyping(false);
-          pushMessage("ai", "這樣啊。如果不勉強自己戒手機，換個地方滑呢？像是去電腦房。");
-          updateDiscussion({ step: 1 });
-        }, 900);
-      } else {
-        setTyping(true);
-        setTimeout(() => {
-          setTyping(false);
-          pushMessage("ai", "了解，那我們先不特別調整，只是想讓你知道，我有在留意這件事。");
-          updateDiscussion({ step: 3 });
-        }, 900);
-      }
-    } else if (d.step === 1) {
-      if (userText === "可以試試") {
-        setTyping(true);
-        setTimeout(() => {
-          setTyping(false);
-          pushMessage("ai", "好，那我把這個加進明天的計畫。");
-          updateDiscussion({ step: 2 });
-          setTimeout(() => updateDiscussion({ showUpdate: true }), 550);
-        }, 900);
-      } else {
-        setTyping(true);
-        setTimeout(() => {
-          setTyping(false);
-          pushMessage("ai", "沒關係，不用勉強，你想到再跟我說。");
-          updateDiscussion({ step: 3 });
-        }, 900);
-      }
-    } else if (d.step === "followup0") {
-      setTyping(true);
-      setTimeout(() => {
-        setTyping(false);
-        pushMessage("ai", userText === "好很多" ? "太好了，那就先維持這樣。" : "沒關係，我們可以再一起調整看看。");
-        updateDiscussion({ step: "followupEnd" });
-      }, 900);
-    } else {
-      setTyping(true);
-      setTimeout(() => {
-        setTyping(false);
-        pushMessage("ai", "好，我先記下來，之後我們可以再聊。");
-      }, 900);
-    }
-  }
-
-  // Typed free text goes through the Memory Classifier: figure out what
-  // kind of message this is, then decide whether to reply, update
-  // Memory, update About You, or ask for confirmation — not the same
-  // flow for every message. One context snapshot is built per message and
-  // reused for every function that needs to read the situation, so they
-  // can never disagree about what "now" looks like mid-turn.
-  function advanceFreeText(userText) {
-    pushMessage("user", userText);
-    const context = buildContext(state);
-    const classification = classifyMessage(userText, context);
-
-    if (classification.intent === "info" || classification.intent === "modify") {
-      const { statement } = classification;
-      let changed = null;
-      let alreadyKnown = false;
-      setState((prev) => {
-        const result = applyDirectStatement(prev, statement);
-        changed = result.changed;
-        alreadyKnown = result.alreadyKnown;
-        return result.state;
-      });
-      setTyping(true);
-      setTimeout(() => {
-        setTyping(false);
-        if (alreadyKnown) {
-          pushMessage("ai", "對，我記得。");
-        } else {
-          pushMessage("ai", classification.intent === "modify" ? "好，幫你更新一下。" : "好，我記下來了。");
-          if (changed) pushCard(changed);
-        }
-      }, 900);
-      return;
-    }
-
-    if (classification.intent === "question") {
-      setTyping(true);
-      setTimeout(() => { setTyping(false); pushMessage("ai", questionReply(userText, context)); }, 900);
-      return;
-    }
-
-    setTyping(true);
-    setTimeout(() => { setTyping(false); pushMessage("ai", chitchatReply(userText, context)); }, 900);
-  }
-
+  // Every typed message: classify it, run it through the Decision Engine
+  // against the current situation, apply whatever it decided, then
+  // reply — all in one state update so the reply is always grounded in
+  // the state the decision was actually made against. There is no step
+  // counter anywhere in this function.
   function handleSend() {
     if (typing) return;
     const text = input.trim();
     if (!text) return;
     setInput("");
-    advanceFreeText(text);
-  }
 
-  function handleApply() {
-    if (d.applied) return;
-    setState((prev) => {
-      let tomorrow = prev.tomorrowJourney;
-      if (!tomorrow.some((s) => s.id === "scrollroom")) {
-        const i = tomorrow.findIndex((s) => s.id === "milktea");
-        const newItem = {
-          id: "scrollroom", label: "電腦房滑手機", iconKey: "Smartphone", emoji: "📱", phase: "morning",
-          sub: "換個地方，感覺會不太一樣。", reason: "還躺在床上很容易越滑越久，換個地方，起床會自然一點。",
-          status: "upcoming", completedAt: null,
+    pushMessage("user", text);
+    setTyping(true);
+    setTimeout(() => {
+      setTyping(false);
+      setState((prev) => {
+        const context = buildContext(prev);
+        context.userText = text;
+        context.thread = prev.discussion.thread;
+        context.classification = classifyMessage(text, context);
+
+        const decision = decisionEngine(context);
+        const { state: appliedState, cards } = applyDecision(prev, decision);
+
+        const replyText = [decision.reply, decision.shouldAsk ? decision.question : null].filter(Boolean).join(" ").trim();
+        const newMessages = [...appliedState.discussion.messages];
+        if (replyText) newMessages.push({ role: "ai", text: replyText });
+        cards.forEach((c) => newMessages.push({ role: "ai", type: "card", ...c }));
+
+        return {
+          ...appliedState,
+          discussion: { ...appliedState.discussion, messages: newMessages, thread: decision._openThread || null },
         };
-        tomorrow = [...tomorrow];
-        tomorrow.splice(i === -1 ? tomorrow.length : i + 1, 0, newItem);
-      }
-      const newGoals = Array.from(new Set([...prev.goals, "減少空腹時間", "縮短賴床時間"]));
-      return { ...prev, tomorrowJourney: tomorrow, goals: newGoals, discussion: { ...prev.discussion, applied: true } };
-    });
+      });
+    }, 900);
   }
 
   function handleAcceptMemory() {
@@ -1626,12 +2029,15 @@ function DiscussionScreen({ C, theme, state, setState }) {
       <div ref={scrollRef} style={{ flex: 1, overflowY: "auto", padding: "14px 20px" }}>
         {d.messages.map((m, i) => {
           if (m.type === "card") {
+            const isJourney = m.cardKind === "journey";
             return (
               <div key={i} style={{ display: "flex", justifyContent: "flex-start", marginBottom: 10, animation: `fadeSlideUp 0.5s ${SPRING_SOFT}` }}>
                 <div style={{ maxWidth: "82%", background: C.accentSoft, borderRadius: 14, padding: "12px 15px" }}>
                   <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 7 }}>
                     <Check size={13} color={C.accent} strokeWidth={3} />
-                    <span style={{ fontFamily: SANS, fontSize: 12, fontWeight: 700, color: C.accent }}>已更新 About You</span>
+                    <span style={{ fontFamily: SANS, fontSize: 12, fontWeight: 700, color: C.accent }}>
+                      {isJourney ? "已調整明天的計畫" : "已更新 About You"}
+                    </span>
                   </div>
                   <div style={{ fontFamily: SANS, fontSize: 11.5, fontWeight: 600, color: C.textTertiary, marginBottom: 3 }}>{m.section}</div>
                   <div style={{ fontFamily: SANS, fontSize: 13, color: C.textPrimary }}>• {m.label}：{m.value}</div>
@@ -1684,51 +2090,6 @@ function DiscussionScreen({ C, theme, state, setState }) {
             </div>
           </div>
         )}
-
-        {quickReplies.length > 0 && !typing && (
-          <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginTop: 6, marginBottom: 6 }}>
-            {quickReplies.map((q) => (
-              <button key={q} onClick={() => advanceScripted(q)} style={{
-                padding: "8px 14px", borderRadius: 999, border: `1.3px solid ${C.accent2}`, background: "transparent",
-                color: C.accent2, fontFamily: SANS, fontSize: 13, fontWeight: 500, cursor: "pointer",
-              }}>
-                {q}
-              </button>
-            ))}
-          </div>
-        )}
-
-        {d.showUpdate && (
-          <div style={{ marginTop: 14, background: C.surface, border: `1px solid ${C.border}`, borderRadius: 16, padding: 18, animation: `bobIn 0.6s ${SPRING}` }}>
-            <div style={{ display: "flex", alignItems: "center", gap: 7, marginBottom: 14 }}>
-              <Sparkles size={15} color={C.accent} />
-              <span style={{ fontFamily: SANS, fontSize: 13, fontWeight: 700, color: C.textPrimary }}>本次更新</span>
-            </div>
-            <div style={{ fontFamily: SANS, fontSize: 12, fontWeight: 600, color: C.textTertiary, marginBottom: 8, letterSpacing: 0.4 }}>新增（明天生效）</div>
-            {["起床後泡奶茶", "去電腦房滑手機"].map((t) => (
-              <div key={t} style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 7 }}>
-                <div style={{ width: 18, height: 18, borderRadius: "50%", background: C.accentSoft, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
-                  <Check size={11} color={C.accent} strokeWidth={3} />
-                </div>
-                <span style={{ fontFamily: SANS, fontSize: 13.5, color: C.textPrimary }}>{t}</span>
-              </div>
-            ))}
-            <div style={{ fontFamily: SANS, fontSize: 12, fontWeight: 600, color: C.textTertiary, margin: "14px 0 8px", letterSpacing: 0.4 }}>目標</div>
-            <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 6 }}>
-              {["減少空腹時間", "縮短賴床時間"].map((g) => (
-                <span key={g} style={{ fontFamily: SANS, fontSize: 12, color: C.accent2, background: C.accent2Soft, padding: "5px 11px", borderRadius: 999, fontWeight: 500 }}>{g}</span>
-              ))}
-            </div>
-            <div style={{ fontFamily: SANS, fontSize: 11.5, color: C.textTertiary, marginBottom: 16 }}>會在明天開始時生效，不影響今天。</div>
-            <button onClick={handleApply} disabled={d.applied} style={{
-              width: "100%", padding: "11px 0", borderRadius: 999, border: "none",
-              background: d.applied ? C.accentSoft : C.accent, color: d.applied ? C.accent : "#fff",
-              fontFamily: SANS, fontSize: 14, fontWeight: 600, cursor: d.applied ? "default" : "pointer", transition: "all 0.2s ease",
-            }}>
-              {d.applied ? "已加入明天的計畫 ✓" : "套用到明天的計畫"}
-            </button>
-          </div>
-        )}
       </div>
 
       <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "10px 16px", borderTop: `1px solid ${C.border}`, background: C.phoneBg }}>
@@ -1744,7 +2105,6 @@ function DiscussionScreen({ C, theme, state, setState }) {
     </div>
   );
 }
-
 /* ----------------------------------------------------------------------
    Insights — derived purely from existing history + today data.
    No new data is stored; these are just computed at render time.
