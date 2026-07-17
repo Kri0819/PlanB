@@ -7,30 +7,26 @@ import {
 } from "lucide-react";
 
 /* ----------------------------------------------------------------------
-   PlanB — v0.1.5 "Memory Graph"
+   PlanB — v0.1.5.1 "Wake-Time Detection & Fabricated-History Cleanup"
 
-   Memory is no longer just a flat list of entries that only ever grows.
-   upsertMemory() keeps the exact signature every caller already uses
-   (Decision Engine's applyDecision, DiscussionScreen's handleAcceptMemory)
-   — nothing about Discussion, Decision Engine, Journey, or the UI
-   changed. What changed is entirely inside the Memory Engine:
+   Two real gaps found via live testing:
 
-   - Restating an existing fact in different words merges into the same
-     entry (canonicalized wording, every phrasing kept in `sources`)
-     instead of creating a duplicate.
-   - A statement that contradicts an existing one supersedes it — the old
-     value is folded into the entry's own `history` (queryable, never
-     deleted), the entry becomes the new fact. Two contradictory facts
-     are never both active at once.
-   - Decay is tiered by category now (TIER_META: identity/health never
-     decay, relationship barely does, preference is slow, habit is
-     medium, current_state is fast) instead of one flat rate per
-     category — getEffectiveConfidence/runMemoryDecay didn't need to
-     change at all, only the data they read did.
-   - An archived memory mentioned again is revived, not duplicated.
-   - context.activeMemories (what Decision Engine reads) is now a bounded
-     "Memory Summary" — ranked by current relevance, capped at 15 —
-     instead of an unbounded dump of every active entry.
+   1. detectDirectStatement had a bedtime rule ("11點睡") but no wake-time
+      counterpart — "我最近都早上六點就起來了" matched nothing and fell
+      through to generic chitchat. Added (digit + Chinese numeral),
+      logged as a Memory entry rather than spliced into profile.sleep
+      (that field is a single "23:30 – 07:30" range string; safely
+      updating just one half of it isn't something a regex should do).
+
+   2. v0.1.1's original scripted demo hardcoded an opening claim — "this
+      week you've eaten lunch at 2pm four days running" — that was never
+      true for anyone; it was demo narrative presented as if it were a
+      real observation. v0.1.4 stopped writing it, but anyone whose
+      conversation history already contained it kept seeing the app
+      assert something false about them, forever, on every visit — the
+      exact thing the Observation/confirmation system exists to prevent.
+      Now stripped on every load (sanitizeState), never written again;
+      real conversation history is untouched.
 ---------------------------------------------------------------------- */
 
 const STORAGE_KEY = "planb_state_v1";
@@ -139,6 +135,21 @@ function computeGreeting(state) {
   if (completedToday === 1) return "開始了，很好。";
   if (completedToday > 1) return `已經完成 ${completedToday} 件事了，繼續這個步調就好。`;
   return FALLBACK_LINES[dayOfYear(now) % FALLBACK_LINES.length];
+}
+
+// v0.1.1's original scripted demo hardcoded an opening claim ("this week
+// you've eaten lunch at 2pm four days in a row") that was never actually
+// true for anyone — it was demo narrative, not a real observation. v0.1.4
+// stopped writing it, but anyone whose history already contains it would
+// keep seeing the app assert something false about them forever, which
+// is exactly what the Observation/confirmation system exists to prevent.
+// Stripped on every load, going forward — never written again.
+const FABRICATED_LEGACY_OPENERS = new Set([
+  "我發現你這星期有四天，都是下午兩點才吃第一餐。",
+  "昨天也是，今天也是。要不要一起想想看？",
+]);
+function stripFabricatedLegacyMessages(messages) {
+  return messages.filter((m) => !(m && m.role === "ai" && FABRICATED_LEGACY_OPENERS.has((m.text || "").trim())));
 }
 
 const JOURNEY_TEMPLATE = [
@@ -468,6 +479,23 @@ function detectDirectStatement(text) {
     const hh = String(CN_HOUR[m[1]]).padStart(2, "0");
     const mm = text.includes("半") ? "30" : "00";
     return { category: "habit", content: `習慣 ${hh}:${mm} 睡覺`, confidence: 90, field: "sleep", value: `${hh}:${mm}` };
+  }
+  // Wake-time — the missing counterpart to the two rules above. Logged as
+  // a Memory only (not written into profile.sleep): that field is a
+  // "23:30 – 07:30" bedtime–wake *range* stored as one string, and
+  // splicing just one half of it back together correctly isn't safe to
+  // do with a regex — better to remember it accurately as its own fact
+  // than to risk silently corrupting the other half of the range.
+  m = text.match(/(\d{1,2})[:：]?(\d{2})?\s*點\s*(?:就)?(?:起床|起來|醒)/);
+  if (m && /每天|通常|習慣|都|固定|最近/.test(text)) {
+    const hh = m[1].padStart(2, "0");
+    const mm = m[2] || "00";
+    return { category: "habit", content: `習慣 ${hh}:${mm} 起床`, confidence: 85 };
+  }
+  m = text.match(/(?:凌晨|早上)?([一二兩三四五六七八九十]{1,2})點\s*(?:就)?(?:起床|起來|醒)/);
+  if (m && CN_HOUR[m[1]] !== undefined && /每天|通常|習慣|都|固定|最近/.test(text)) {
+    const hh = String(CN_HOUR[m[1]]).padStart(2, "0");
+    return { category: "habit", content: `習慣 ${hh}:00 起床`, confidence: 85 };
   }
 
   m = text.match(/我(?:現在)?在([^\s，。！？,.!?]{1,8}業)/);
@@ -1232,9 +1260,11 @@ function sanitizeState(raw) {
   };
 
   const rawDiscussion = isPlainObject(raw.discussion) ? raw.discussion : {};
-  const messages = Array.isArray(rawDiscussion.messages)
-    ? rawDiscussion.messages.filter((m) => isPlainObject(m) && (typeof m.text === "string" || m.type === "card"))
-    : base.discussion.messages;
+  const messages = stripFabricatedLegacyMessages(
+    Array.isArray(rawDiscussion.messages)
+      ? rawDiscussion.messages.filter((m) => isPlainObject(m) && (typeof m.text === "string" || m.type === "card"))
+      : base.discussion.messages
+  );
   const discussion = {
     messages: messages.length ? messages : base.discussion.messages,
     // v0.1.4 replaced the old step/showUpdate/applied/followedUp shape
