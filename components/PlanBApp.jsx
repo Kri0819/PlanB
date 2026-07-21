@@ -7,26 +7,21 @@ import {
 } from "lucide-react";
 
 /* ----------------------------------------------------------------------
-   PlanB — v0.1.5.1 "Wake-Time Detection & Fabricated-History Cleanup"
+   PlanB — v0.1.7 "Philosophy Refactor"
 
-   Two real gaps found via live testing:
-
-   1. detectDirectStatement had a bedtime rule ("11點睡") but no wake-time
-      counterpart — "我最近都早上六點就起來了" matched nothing and fell
-      through to generic chitchat. Added (digit + Chinese numeral),
-      logged as a Memory entry rather than spliced into profile.sleep
-      (that field is a single "23:30 – 07:30" range string; safely
-      updating just one half of it isn't something a regex should do).
-
-   2. v0.1.1's original scripted demo hardcoded an opening claim — "this
-      week you've eaten lunch at 2pm four days running" — that was never
-      true for anyone; it was demo narrative presented as if it were a
-      real observation. v0.1.4 stopped writing it, but anyone whose
-      conversation history already contained it kept seeing the app
-      assert something false about them, forever, on every visit — the
-      exact thing the Observation/confirmation system exists to prevent.
-      Now stripped on every load (sanitizeState), never written again;
-      real conversation history is untouched.
+   Plan B is not a Habit App. Rewrote every place in this file that
+   scored, ranked, or gated warmth behind a completion metric
+   (computeInsights no longer computes a completion rate or ranks Journey
+   items by how often they're finished; computeGreeting/encouragementReply
+   no longer display or gate on a streak/rate number). Added
+   detectReplanScenario (overslept/skipped exercise/indulgent food ->
+   help replan, never evaluate) and detectMedicalSafety (prescription
+   drugs, contraception, acute symptoms -> a clear safety message with a
+   disclaimer, checked before anything else in decisionEngine, even an
+   open thread). See the "Product Philosophy" comment block right above
+   decisionEngine for the full principle and what it does and doesn't
+   cover. No new pages, no large new subsystems, no UI restructuring —
+   existing interface kept, underlying philosophy corrected.
 ---------------------------------------------------------------------- */
 
 const STORAGE_KEY = "planb_state_v1";
@@ -117,6 +112,12 @@ function computeStreak(state) {
   return streak;
 }
 
+// Philosophy note (v0.1.7): computeStreak() still exists internally (it
+// decides which *tone* of message fits), but the actual number is never
+// shown to the person anymore — displaying a countable streak is exactly
+// the kind of gamified metric Plan B intentionally doesn't have. What's
+// said instead just acknowledges a steady stretch, without turning it
+// into something to keep chasing or eventually break.
 function computeGreeting(state) {
   const now = new Date();
   const hour = now.getHours();
@@ -127,8 +128,8 @@ function computeGreeting(state) {
   const streak = computeStreak(state);
 
   if (allDone) return "今天都完成了，剩下的時間好好休息。";
-  if (streak >= 5) return `已經連續 ${streak} 天了，這個節奏很穩定。`;
-  if (streak >= 2 && completedToday === 0 && hour < 11) return `連續 ${streak} 天了，今天也慢慢開始就好。`;
+  if (streak >= 5) return "最近這陣子的步調感覺很穩定。";
+  if (streak >= 2 && completedToday === 0 && hour < 11) return "最近這幾天挺穩定的，今天也慢慢開始就好。";
   if (completedToday === 0 && hour < 11) return FALLBACK_LINES[dayOfYear(now) % FALLBACK_LINES.length];
   if (completedToday === 0 && hour >= 11 && hour < 17) return "今天比較忙也沒關係，現在開始也可以。";
   if (completedToday === 0 && hour >= 17) return "晚一點開始，也是開始。";
@@ -676,8 +677,11 @@ function comfortReply() {
   return "辛苦了。";
 }
 
+// Philosophy note (v0.1.7): warmth here is never gated behind a
+// completion percentage or streak count — that would just be scoring
+// dressed up in kind words. Whatever the person shares something good
+// about, the response is the same regardless of "how much" they did.
 function encouragementReply(context) {
-  if (context.userSignals.talksOften && context.today.completionRate >= 70) return "這樣的節奏很不容易，繼續保持。";
   if (context.today.completedCount > 0) return "很替你開心，繼續這個步調就好。";
   return "聽起來不錯，我也替你開心。";
 }
@@ -835,8 +839,60 @@ function resolveThread(thread, context) {
   return d;
 }
 
+/* ----------------------------------------------------------------------
+   Product Philosophy (v0.1.7)
+
+   Plan B is not a habit app and does not score anyone's life. The job
+   here is never "get the person to complete more things" — it's protect
+   health, lower pressure, help replan around whatever actually happened,
+   and support a life that can be sustained long-term, even one that
+   doesn't look "perfect" from the outside.
+
+   - No completion rates, no streak numbers shown to the person, no
+     ranking of what they're "good" or "bad" at finishing.
+   - When something didn't go as planned, the AI's first move is always
+     to help replan, never to evaluate — see detectReplanScenario.
+   - Health takes priority over encouragement — see detectMedicalSafety,
+     checked before anything else in decisionEngine.
+   - Personality (aiPersonality: gentle/coach/humor) can vary tone and
+     directness, but none of the options are a "scolding mode", and
+     nothing in this file ever produces blaming or guilt-based language.
+   - Health topics (periods, contraception, pregnancy) are ordinary
+     health information, never an opening for sexual content — this app
+     has no generative/open-ended text capability today (every reply is
+     a template string chosen by rules), so there's no actual surface
+     for that risk currently; noted here for if a generative layer is
+     ever added.
+   - Future versions should not add leaderboards, completion
+     percentages, or login/completion streaks of any kind.
+---------------------------------------------------------------------- */
+
+function detectMedicalSafety(text) {
+  const EMERGENCY_MEDICAL = /緊急避孕|事後避孕藥|忘記吃避孕藥|漏吃避孕藥|胸痛|呼吸困難|喘不過氣|大量出血|血流不止|昏倒|暈倒|過敏性休克|中毒/;
+  const PRESCRIPTION_MEDICAL = /處方藥|抗生素|類固醇|忘記吃藥|漏吃藥/;
+  if (EMERGENCY_MEDICAL.test(text)) return "urgent";
+  if (PRESCRIPTION_MEDICAL.test(text)) return "prescription";
+  return null;
+}
+
+function detectReplanScenario(text) {
+  if (/睡過頭|起晚了|睡晚了|起床晚了|睡太晚/.test(text)) return "overslept";
+  if (/沒運動|沒去運動|沒去健身|沒動到|忘記運動/.test(text)) return "noExercise";
+  if (/吃了?(速食|垃圾食物|炸雞|薯條|洋芋片|甜點|蛋糕|手搖|含糖飲料|鹹酥雞|泡麵)/.test(text)) return "indulgentFood";
+  return null;
+}
+
 function decisionEngine(context) {
   const { userText, classification, thread } = context;
+
+  const medical = detectMedicalSafety(userText);
+  if (medical) {
+    const d = emptyDecision();
+    d.reply = medical === "urgent"
+      ? "這件事情具有健康風險，建議現在就處理或聯絡醫療專業協助。我不是醫療人員，沒辦法判斷實際狀況——如果情況緊急，請優先聯絡119或前往急診。"
+      : "這跟用藥有關，請以醫師或藥師的指示為準。我可以陪你一起想怎麼安排提醒，但沒辦法取代專業醫療建議。";
+    return d;
+  }
 
   // 1. Is this answering something the AI just asked?
   if (thread) return resolveThread(thread, context);
@@ -853,6 +909,17 @@ function decisionEngine(context) {
     d.reply = isDiscomfort
       ? "辛苦了，好好休息。"
       : classification.intent === "modify" ? "好，幫你更新一下。" : "好，我記下來了。";
+    return d;
+  }
+
+  // Situational replanning — the person states what happened, and the
+  // response replans around it instead of evaluating it.
+  const replanScenario = detectReplanScenario(userText);
+  if (replanScenario) {
+    const d = emptyDecision();
+    if (replanScenario === "overslept") d.reply = "今天起床比較晚，我們重新安排今天。";
+    else if (replanScenario === "noExercise") d.reply = "今天想休息也可以，要不要改成散步或伸展？";
+    else if (replanScenario === "indulgentFood") d.reply = "今天吃了這些沒關係，下一餐可以補一些蔬菜，不用有壓力。";
     return d;
   }
 
@@ -2114,6 +2181,12 @@ function DiscussionScreen({ C, theme, state, setState }) {
    No new data is stored; these are just computed at render time.
 ---------------------------------------------------------------------- */
 
+// Philosophy note (v0.1.7): this deliberately does NOT compute a
+// completion rate or rank Journey items by how often they get finished.
+// Plan B isn't a habit tracker and doesn't score anyone's days — the
+// only things surfaced here are plain facts (how long we've been doing
+// this together, roughly when the first thing of the day tends to
+// happen) that carry no judgment either way.
 function computeInsights(state) {
   const recordedDays = Object.keys(state.history).length;
   if (recordedDays === 0) return { recordedDays, ready: false };
@@ -2121,22 +2194,6 @@ function computeInsights(state) {
   const historyEntries = Object.values(state.history).map((d) => d.entries || []);
   const todayEntries = state.todayJourney.filter((i) => i.completedAt).map((i) => ({ label: i.label, completedAt: i.completedAt }));
   const allDays = [...historyEntries, todayEntries];
-
-  const denom = Math.max(state.todayJourney.length, 1);
-  const rates = allDays.map((entries) => entries.length / denom);
-  const avgRate = Math.round((rates.reduce((a, b) => a + b, 0) / rates.length) * 100);
-
-  const freq = {};
-  allDays.forEach((entries) => {
-    const seen = new Set();
-    entries.forEach((e) => {
-      if (!seen.has(e.label)) { freq[e.label] = (freq[e.label] || 0) + 1; seen.add(e.label); }
-    });
-  });
-  const labels = Object.keys(freq).sort((a, b) => freq[b] - freq[a]);
-  const mostStable = labels[0] || null;
-  let mostDelayed = labels.length > 1 ? labels[labels.length - 1] : null;
-  if (mostDelayed === mostStable) mostDelayed = null;
 
   const firstTimes = allDays
     .filter((entries) => entries.length > 0)
@@ -2151,7 +2208,7 @@ function computeInsights(state) {
     avgFirstTimeLabel = `${String(Math.floor(avgMin / 60)).padStart(2, "0")}:${String(avgMin % 60).padStart(2, "0")}`;
   }
 
-  return { recordedDays, ready: true, avgRate, mostStable, mostDelayed, avgFirstTimeLabel };
+  return { recordedDays, ready: true, avgFirstTimeLabel };
 }
 
 function InsightCard({ C, label, value, sub }) {
@@ -2290,10 +2347,7 @@ function MyLifeScreen({ C, theme, state, setState, onTestNotification }) {
       ) : (
         <div style={{ display: "flex", flexWrap: "wrap", gap: 10 }}>
           <InsightCard C={C} label="已經一起" value={`${insights.recordedDays} 天`} />
-          <InsightCard C={C} label="最近完成率" value={`${insights.avgRate}%`} />
-          {insights.mostStable && <InsightCard C={C} label="最穩定完成" value={insights.mostStable} />}
-          {insights.mostDelayed && <InsightCard C={C} label="最容易拖延" value={insights.mostDelayed} />}
-          {insights.avgFirstTimeLabel && <InsightCard C={C} label="平均開始時間" value={insights.avgFirstTimeLabel} sub="第一件完成的事" />}
+          {insights.avgFirstTimeLabel && <InsightCard C={C} label="平均開始時間" value={insights.avgFirstTimeLabel} sub="第一件事通常發生的時間" />}
         </div>
       )}
 
